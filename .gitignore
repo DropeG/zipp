@@ -33,6 +33,7 @@ data/*.db-*
 data/*.db.*
 data/*.sqlite
 data/shopify_webhooks/
+logs/
 *.log
 
 # Generated exports, audits, and temporary image workspaces

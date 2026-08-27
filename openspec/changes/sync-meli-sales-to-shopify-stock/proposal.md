@@ -24,8 +24,8 @@ None.
 ## Impact
 
 - Affected scripts:
-  - `scripts/shopify_webhook_catcher.js`
-  - `scripts/process_meli_to_shopify_stock.py`
+  - `automations/stock-sync/scripts/shopify_webhook_catcher.js`
+  - `automations/stock-sync/scripts/process_meli_to_shopify_stock.py`
   - potentially shared Shopify/Meli request helpers if extracted during implementation
 - Affected data:
   - `data/stock_sync.db`

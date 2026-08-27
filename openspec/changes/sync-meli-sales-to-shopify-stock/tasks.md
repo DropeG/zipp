@@ -43,4 +43,4 @@
 - [x] 6.2 Run a dry-run against real Mercado Libre order `2000018107143682` for SKU `SOP-BAS-58` and verify expected target stock is reported.
 - [x] 6.3 Apply only a single known ready task after dry-run output is reviewed.
 - [x] 6.4 Re-run the same order after apply and verify it does not decrement Shopify stock a second time.
-- [x] 6.5 Update `STOCK_SYNC_CONTEXT.md` with the validated Mercado Libre -> Shopify flow and operating commands.
+- [x] 6.5 Update `automations/stock-sync/docs/HISTORICAL_CONTEXT.md` with the validated Mercado Libre -> Shopify flow and operating commands.

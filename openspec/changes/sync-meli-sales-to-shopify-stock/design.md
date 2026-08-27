@@ -2,9 +2,9 @@
 
 The repository already has a local stock synchronization foundation:
 
-- `scripts/shopify_webhook_catcher.js` stores Shopify and Mercado Libre webhook payloads in `data/stock_sync.db`.
-- `scripts/process_shopify_to_meli_stock.py` processes Shopify-originated sales through `stock_tasks`, supports dry-run, and applies stock to Mercado Libre.
-- `scripts/process_meli_to_shopify_stock.py` can read Mercado Libre raw events or a specific order, fetch `/orders/{id}`, and resolve SKU/quantity in dry-run.
+- `automations/stock-sync/scripts/shopify_webhook_catcher.js` stores Shopify and Mercado Libre webhook payloads in `data/stock_sync.db`.
+- `automations/stock-sync/scripts/process_shopify_to_meli_stock.py` processes Shopify-originated sales through `stock_tasks`, supports dry-run, and applies stock to Mercado Libre.
+- `automations/stock-sync/scripts/process_meli_to_shopify_stock.py` can read Mercado Libre raw events or a specific order, fetch `/orders/{id}`, and resolve SKU/quantity in dry-run.
 
 The real Mercado Libre order `2000018107143682` for SKU `SOP-BAS-58` showed that order permissions are now usable, the order status is `paid`, and the line item exposes SKU and quantity directly.
 
