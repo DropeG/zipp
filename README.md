@@ -4,14 +4,13 @@ Repositorio general para automatizaciones operativas de Zipp.
 
 Este repo no representa una sola herramienta. Cada automatizacion vive en su propia carpeta bajo `automations/`, con sus scripts, pruebas y documentacion local. La primera automatizacion lista para traspaso es el sincronizador de stock Shopify <-> Mercado Libre.
 
-## Automatizaciones
+## Automatizaciones Activas
 
 | Automatizacion | Carpeta | Estado |
 | --- | --- | --- |
 | Stock sync Shopify <-> Mercado Libre | `automations/stock-sync/` | Funciona localmente; pendiente montaje en servidor |
-| Publicacion Shopify -> Mercado Libre | `automations/product-publishing/` | Herramientas existentes organizadas; documentacion minima |
-| Reportes / actualizacion de inventario | `automations/inventory-reports/` | Herramientas existentes organizadas; documentacion minima |
-| Publicaciones inactivas Meli | `automations/inactive-listings/` | Notas historicas del flujo manual |
+
+Las automatizaciones futuras o incompletas no se listan como activas hasta que tengan estado y documentacion minima clara.
 
 ## Entrada Rapida
 
@@ -38,9 +37,7 @@ automations/stock-sync/docs/HANDOFF.md
 ```text
 automations/
   stock-sync/             Sincronizador de stock Shopify <-> Mercado Libre.
-  product-publishing/     Publicacion de productos Shopify en Mercado Libre.
-  inventory-reports/      Herramientas Excel/reportes de inventario Shopify.
-  inactive-listings/      Revision de publicaciones inactivas o bajo revision.
+  <automation-id>/        Futuras automatizaciones documentadas cuando esten activas.
 
 shared/                   Clientes y helpers reutilizables.
 data/                     Estado runtime local/servidor, no versionado salvo .gitkeep.
@@ -87,8 +84,11 @@ Cada README local debe explicar:
 - como ejecutar en modo real
 - que falta o que riesgos conocidos tiene
 
+Protocolo completo: `docs/AUTOMATION_DOCUMENTATION_PROTOCOL.md`.
+
 ## Documentacion Global
 
+- `docs/AUTOMATION_DOCUMENTATION_PROTOCOL.md`: regla para documentar futuras automatizaciones.
 - `docs/REPO_STRUCTURE.md`: convenciones de carpetas y responsabilidades.
 - `docs/SERVER_BASELINE.md`: base recomendada para montar automatizaciones en servidor.
 - `automations/stock-sync/docs/HANDOFF.md`: manual de traspaso del sincronizador.

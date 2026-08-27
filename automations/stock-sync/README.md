@@ -69,6 +69,7 @@ PORT=3000 node automations/stock-sync/scripts/shopify_webhook_catcher.js
 - `docs/HANDOFF.md`: pasos para montar en servidor.
 - `docs/ARCHITECTURE.md`: como funciona internamente.
 - `docs/OPERATIONS.md`: operacion diaria, logs, SQLite y backups.
+- `docs/LOCAL_TESTING.md`: como probar localmente imitando produccion.
 - `docs/TROUBLESHOOTING.md`: problemas comunes y recuperacion.
 - `docs/PENDING.md`: pendientes y mejoras futuras.
 - `docs/HISTORICAL_CONTEXT.md`: bitacora historica validada durante desarrollo.
