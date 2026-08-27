@@ -1,0 +1,48 @@
+.DS_Store
+
+# Secrets and local credentials
+.env
+.env.*
+!.env.example
+meli_tokens*.json
+
+# Local agent/editor configuration
+.agent/
+.agents/
+.claude/
+.codex/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+venv/
+venv.*/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Runtime data and local state
+data/*.db
+data/*.db-*
+data/*.db.*
+data/*.sqlite
+data/shopify_webhooks/
+*.log
+
+# Generated exports, audits, and temporary image workspaces
+Reporte Stock.xlsx
+reporte_stock_*.csv
+audit_shopify.json
+one_by_one_selection_audit.json
+productos_listos*.json
+productos_pendientes.json
+respaldo_stock_productos_sin_bodega.json
+shopify_products_full.json
+sync_blocked_products.json
+.tmp_shopify_images*/
