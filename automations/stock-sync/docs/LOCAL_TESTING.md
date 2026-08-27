@@ -1,26 +1,27 @@
 # Pruebas Locales: Stock Sync
 
-Manual para probar el sincronizador Shopify <-> Mercado Libre desde un computador local imitando produccion.
+Manual humano para probar el sincronizador Shopify <-> Mercado Libre desde un computador local.
 
-La idea es validar el flujo real con webhooks reales, SQLite local, dry-run y, solo si corresponde, un apply manual limitado.
+La meta es imitar produccion lo suficiente para confirmar que:
 
-## Objetivo
+- Shopify o Mercado Libre pueden enviar webhooks al computador local.
+- El catcher recibe esos webhooks.
+- SQLite guarda el evento.
+- El sincronizador crea o procesa tareas.
+- El dry-run entiende que stock cambiaria.
+- El humano decide si quiere aplicar o solo limpiar la prueba.
 
-Probar que la automatizacion puede:
+## Idea Simple
 
-- recibir webhooks desde Shopify o Mercado Libre
-- guardar eventos en `data/stock_sync.db`
-- crear o procesar tareas de stock
-- ejecutar dry-run sin tocar stock real
-- aplicar un cambio real controlado cuando el humano lo decide
+Tu computador no es publico en internet. Shopify y Mercado Libre no pueden enviar webhooks directo a `localhost:3000`.
 
-## Flujo De Prueba
+`cloudflared` crea una URL publica temporal que apunta a tu computador:
 
 ```text
 Shopify / Mercado Libre
         |
         v
-URL publica temporal de cloudflared
+https://xxxxx.trycloudflare.com
         |
         v
 http://localhost:3000
@@ -30,17 +31,13 @@ webhook_catcher.js
         |
         v
 data/stock_sync.db
-        |
-        v
-dry-run
-        |
-        v
-apply manual limitado
 ```
 
-## Requisitos Locales
+Importante: `http://localhost:3000` no es una pagina visual. Si lo abres en el navegador puede mostrar `Not found`, y eso esta bien. Este servicio es una puerta para recibir webhooks `POST`.
 
-Ejecutar desde la raiz del repo.
+## Antes De Empezar
+
+Ejecutar comandos desde la raiz del repo.
 
 Debe existir:
 
@@ -52,7 +49,7 @@ Debe existir:
 - Acceso a Shopify Admin.
 - Acceso a la app de Mercado Libre usada por Zipp.
 
-Instalacion base si todavia no existe:
+Instalacion base si todavia falta algo:
 
 ```bash
 python3 -m venv venv
@@ -85,7 +82,13 @@ Validar permisos basicos de Mercado Libre:
 ./venv/bin/python automations/stock-sync/scripts/process_meli_to_shopify_stock.py --check-permissions
 ```
 
-## 1. Levantar El Catcher Local
+## Prueba Guiada: Shopify -> Mercado Libre
+
+Esta es la prueba recomendada para confirmar que el webhook local funciona.
+
+En esta prueba se crea una orden real o manual de Shopify, pero primero solo se llega hasta dry-run. Eso permite confirmar el flujo sin tocar stock en Mercado Libre.
+
+### 1. Levantar El Catcher
 
 En una terminal:
 
@@ -93,16 +96,16 @@ En una terminal:
 PORT=3000 node automations/stock-sync/scripts/shopify_webhook_catcher.js
 ```
 
-Debe mostrar algo parecido a:
+Debe quedar abierto y mostrar algo parecido a:
 
 ```text
 Escuchando en http://localhost:3000
 Guardando datos en: .../data/stock_sync.db
 ```
 
-Dejar esta terminal abierta mientras dure la prueba.
+Si aparece un warning de SQLite experimental en Node, no bloquea esta prueba.
 
-## 2. Abrir Un Tunel Publico Temporal
+### 2. Abrir El Tunel
 
 En otra terminal:
 
@@ -110,53 +113,108 @@ En otra terminal:
 cloudflared tunnel --url http://localhost:3000
 ```
 
-Cloudflared entregara una URL publica temporal parecida a:
+Cloudflared mostrara una URL publica temporal:
 
 ```text
 https://nombre-temporal.trycloudflare.com
 ```
 
-Usar esa URL solo durante la prueba local. Si se cierra el tunnel, la URL deja de servir.
+Copiar esa URL. Mientras el comando siga corriendo, Shopify podra llegar a tu computador por esa direccion.
 
-## 3. Configurar Webhooks Temporales
+### 3. Probar Que El Tunel Llega Al Catcher
 
-Usar la URL temporal de cloudflared para apuntar los webhooks al computador local.
+Opcional, pero util para entenderlo:
 
-Shopify:
-
-```text
-https://nombre-temporal.trycloudflare.com/webhooks/shopify/orders-create
+```bash
+curl -i https://nombre-temporal.trycloudflare.com/
 ```
 
-Mercado Libre:
+Es normal recibir:
 
 ```text
-https://nombre-temporal.trycloudflare.com/webhooks/meli/orders
+HTTP/2 404
+Not found
 ```
 
-Configurar solo los eventos necesarios para la prueba.
+Eso significa que Cloudflare si llego al catcher, pero la ruta `/` no existe. Los webhooks reales usan rutas especificas y metodo `POST`.
 
-No dejar estos webhooks temporales activos despues de terminar. En produccion deben apuntar al dominio o tunnel estable del servidor.
+### 4. Crear Webhook Temporal En Shopify
 
-## 4. Generar Un Evento De Prueba
+En Shopify Admin:
 
-Para Shopify -> Mercado Libre:
+```text
+Settings / Configuracion
+Notifications / Notificaciones
+Webhooks
+Create webhook / Crear webhook
+```
 
-1. Elegir un producto que exista en Shopify y Mercado Libre con el mismo SKU.
-2. Confirmar manualmente el stock actual en ambos sistemas.
-3. Crear una venta/pedido de prueba en Shopify.
-4. Esperar a que Shopify envie el webhook `orders/create`.
+Configurar:
 
-Para Mercado Libre -> Shopify:
+```text
+Event / Evento: Order creation / orders/create
+Format / Formato: JSON
+URL: https://nombre-temporal.trycloudflare.com/webhooks/shopify/orders-create
+```
 
-1. Elegir una publicacion de Mercado Libre que tenga SKU equivalente en Shopify.
-2. Confirmar manualmente el stock actual en ambos sistemas.
-3. Generar o esperar una venta/notificacion de orden en Mercado Libre.
-4. Esperar a que Mercado Libre envie el webhook de orden.
+Guardar el webhook.
 
-Usar productos de bajo riesgo o cantidades pequenas. Esta prueba puede terminar tocando stock real si luego se ejecuta `--apply`.
+No usar una URL antigua. Cada tunnel nuevo crea una URL nueva.
 
-## 5. Confirmar Que Llego El Webhook
+### 5. Crear Una Orden Manual De Prueba
+
+En Shopify Admin:
+
+```text
+Orders / Pedidos
+Create order / Crear pedido
+```
+
+Elegir un producto que:
+
+- exista en Shopify
+- exista en Mercado Libre
+- tenga el mismo SKU en ambos lados
+- tenga stock suficiente
+
+Antes de crear la orden, anotar:
+
+```text
+SKU:
+Stock Shopify antes:
+Stock Mercado Libre antes:
+```
+
+Crear la orden con:
+
+```text
+Cantidad: 1
+Cliente: prueba o cliente interno
+Nota: pedido de prueba
+Pago: marcar como pagado, si Shopify lo pide para crear la orden final
+```
+
+La orden debe quedar como orden real, no solo como borrador. En nuestra prueba validada fue una orden tipo `#1283`, pagada, con SKU `PLA-ZIP-CI-95`.
+
+### 6. Confirmar Que Llego Al Catcher
+
+Mirar la terminal donde corre `webhook_catcher.js`.
+
+Un webhook exitoso de Shopify se ve asi:
+
+```text
+Raw event Shopify guardado
+Webhook ID: ...
+Topic: orders/create
+Shop: ...
+Order ID: ...
+Order name: #1283
+Stock task creada: PLA-ZIP-CI-95 -> pending
+```
+
+Si dice `Stock task ya existia, no se duplico`, significa que la misma orden ya estaba registrada antes. Eso tambien confirma que llego, pero no sirve como prueba nueva del flujo completo.
+
+### 7. Confirmar En SQLite
 
 Abrir SQLite:
 
@@ -175,97 +233,134 @@ LIMIT 10;
 
 Resultado esperado:
 
-- Para Shopify debe aparecer `source = 'shopify'`.
-- Para Mercado Libre debe aparecer `source = 'meli'`.
+```text
+source = shopify
+topic = orders/create
+order_name = #NUMERO_DE_ORDEN
+```
 
-## 6. Confirmar Tareas De Stock
-
-Shopify crea tareas desde el catcher cuando llega el webhook:
+Ver tareas recientes:
 
 ```sql
-SELECT task_id, source, order_id, order_name, sku, quantity_sold, status, updated_at
+SELECT task_id, source, order_id, order_name, sku, quantity_sold, status, human_note, updated_at
 FROM stock_tasks
 ORDER BY updated_at DESC
 LIMIT 20;
 ```
 
-Resultado esperado para Shopify:
+Resultado esperado:
 
-- `source = 'shopify'`
-- `status = 'pending'` si el SKU y la variante vienen bien
-- `status = 'needs_review'` si falta SKU u otro dato critico
+```text
+source = shopify
+sku = SKU_DE_LA_ORDEN
+quantity_sold = 1
+status = pending
+```
 
-Para Mercado Libre, el webhook primero queda en `raw_events`. Las tareas se crean cuando se procesa el evento con el script Meli -> Shopify.
+### 8. Ejecutar Dry-Run
 
-## 7. Ejecutar Dry-Run
-
-Dry-run no modifica stock real. Sirve para revisar que la automatizacion entiende correctamente la tarea.
-
-Shopify -> Mercado Libre:
+Dry-run no toca stock real. Solo revisa que el sistema sabe que haria.
 
 ```bash
 ./venv/bin/python automations/stock-sync/scripts/process_shopify_to_meli_stock.py --limit 10
 ```
 
-Mercado Libre -> Shopify:
+Un resultado bueno se ve asi:
 
-```bash
-./venv/bin/python automations/stock-sync/scripts/process_meli_to_shopify_stock.py --limit 10
+```text
+Modo: dry-run (no actualiza Mercado Libre)
+Tareas pending encontradas: 1
+Shopify location activa: ...
+Publicaciones Meli cargadas para busqueda SKU: ...
+
+Procesando PLA-ZIP-CI-95 (#1283)
+  Shopify stock actual: 6
+  Meli item: MLC4223500744 (Placa De Metal Adhesiva Redonda)
+  Meli stock actual: 7
+  -> ready_to_apply: Meli quedaria en 6
+
+Dry-run terminado.
 ```
 
-Orden puntual de Mercado Libre:
+Como leerlo:
 
-```bash
-./venv/bin/python automations/stock-sync/scripts/process_meli_to_shopify_stock.py --order-id ORDER_ID
-```
+- `Shopify stock actual: 6`: Shopify ya bajo el stock por la orden.
+- `Meli stock actual: 7`: Mercado Libre todavia esta en el stock anterior.
+- `Meli quedaria en 6`: el sincronizador quiere igualar Meli con Shopify.
+- `ready_to_apply`: la tarea esta lista para aplicar si el humano decide tocar Meli.
 
-Revisar tareas despues del dry-run:
+Hasta aqui Mercado Libre no fue modificado.
 
-```sql
-SELECT task_id, source, order_id, sku, quantity_sold, status, human_note, updated_at
-FROM stock_tasks
-ORDER BY updated_at DESC
-LIMIT 20;
-```
+### 9. Si Solo Querias Confirmar Que Funcionaba
 
-Resultado esperado:
+Si el objetivo era confirmar webhook + dry-run, puedes parar aqui.
 
-- `ready_to_apply` si la automatizacion encontro una accion segura.
-- `needs_review` si necesita mirada humana.
-- `skipped_not_in_meli` o `skipped_not_in_shopify` si el SKU no existe en el otro sistema.
-
-## 8. Aplicar Un Cambio Real Controlado
-
-Aplicar solo despues de revisar el dry-run y confirmar manualmente que el cambio esperado es correcto.
-
-Usar `--limit 1` para probar una sola tarea:
-
-Shopify -> Mercado Libre:
+No ejecutes:
 
 ```bash
 ./venv/bin/python automations/stock-sync/scripts/process_shopify_to_meli_stock.py --apply --limit 1
 ```
 
-Mercado Libre -> Shopify:
+Ese comando si toca stock real en Mercado Libre.
 
-```bash
-./venv/bin/python automations/stock-sync/scripts/process_meli_to_shopify_stock.py --apply --limit 1
-```
+Para dejar la prueba cerrada:
 
-Orden puntual de Mercado Libre:
+1. Cancelar o reembolsar la orden de prueba en Shopify.
+2. Marcar la opcion para devolver el articulo al inventario.
+3. Revisar que el stock de Shopify volvio al numero anterior.
+4. Eliminar o desactivar el webhook temporal de Shopify.
+5. Detener `cloudflared`.
+6. Detener `webhook_catcher.js`.
+7. Neutralizar la tarea local si quedo en `ready_to_apply`.
 
-```bash
-./venv/bin/python automations/stock-sync/scripts/process_meli_to_shopify_stock.py --order-id ORDER_ID --apply --limit 1
-```
-
-Despues del apply:
-
-1. Revisar stock en Shopify.
-2. Revisar stock en Mercado Libre.
-3. Revisar estado final en SQLite.
+Para neutralizar la tarea local, usar el `order_id` real de la orden de prueba:
 
 ```sql
-SELECT task_id, source, order_id, sku, quantity_sold, status, human_note, updated_at
+UPDATE stock_tasks
+SET status = 'needs_review',
+    human_note = 'Prueba local cancelada/revertida manualmente. No aplicar al stock de Mercado Libre.',
+    updated_at = datetime('now')
+WHERE order_id = 'ORDER_ID_DE_PRUEBA'
+  AND status = 'ready_to_apply';
+```
+
+Confirmar:
+
+```sql
+SELECT task_id, order_name, sku, quantity_sold, status, human_note
+FROM stock_tasks
+WHERE order_id = 'ORDER_ID_DE_PRUEBA';
+```
+
+Resultado esperado:
+
+```text
+status = needs_review
+human_note = Prueba local cancelada/revertida manualmente...
+```
+
+## Aplicar Un Cambio Real Controlado
+
+Usar esta seccion solo si el humano decide probar el cambio real de stock en Mercado Libre.
+
+Antes de aplicar:
+
+- Revisar el dry-run.
+- Confirmar SKU.
+- Confirmar stock actual en Shopify.
+- Confirmar item correcto en Mercado Libre.
+- Usar `--limit 1`.
+
+Comando:
+
+```bash
+./venv/bin/python automations/stock-sync/scripts/process_shopify_to_meli_stock.py --apply --limit 1
+```
+
+Despues del apply, revisar:
+
+```sql
+SELECT task_id, source, order_id, order_name, sku, quantity_sold, status, human_note, updated_at
 FROM stock_tasks
 ORDER BY updated_at DESC
 LIMIT 20;
@@ -273,33 +368,76 @@ LIMIT 20;
 
 Resultado esperado:
 
-- La tarea aplicada queda en `synced`.
-- El stock real cambia solo en el sistema destino.
-- Reprocesar la misma orden no debe descontar dos veces.
+```text
+status = synced
+```
 
-## 9. Limpieza Despues De Probar
+Tambien revisar manualmente el stock final en Shopify y Mercado Libre.
 
-Al terminar:
+## Prueba Mercado Libre -> Shopify
 
-1. Detener el tunnel `cloudflared`.
-2. Detener el catcher local.
-3. Eliminar o desactivar webhooks temporales que apunten a `trycloudflare.com`.
-4. Confirmar que no quedan procesadores corriendo en automatico.
-5. Mantener `data/stock_sync.db` si se quiere conservar auditoria local de la prueba.
+El flujo Meli -> Shopify usa el mismo tunnel, pero el webhook temporal debe apuntar a:
 
-## Checklist De Prueba Local
+```text
+https://nombre-temporal.trycloudflare.com/webhooks/meli/orders
+```
 
-- [ ] `.env` configurado.
-- [ ] `meli_tokens.json` creado.
-- [ ] `--check-permissions` de Mercado Libre revisado.
-- [ ] Catcher local corriendo en `localhost:3000`.
-- [ ] Tunnel `cloudflared` activo.
-- [ ] Webhook temporal configurado.
-- [ ] Evento recibido en `raw_events`.
-- [ ] Tarea creada o procesada en `stock_tasks`.
-- [ ] Dry-run ejecutado.
-- [ ] Resultado revisado por humano.
-- [ ] Apply manual con `--limit 1`, si corresponde.
-- [ ] Stock final revisado en Shopify y Mercado Libre.
-- [ ] Webhooks temporales eliminados o desactivados.
-- [ ] Tunnel y catcher detenidos.
+Despues de recibir una notificacion Meli, correr:
+
+```bash
+./venv/bin/python automations/stock-sync/scripts/process_meli_to_shopify_stock.py --limit 10
+```
+
+Para una orden puntual:
+
+```bash
+./venv/bin/python automations/stock-sync/scripts/process_meli_to_shopify_stock.py --order-id ORDER_ID
+```
+
+Aplicar, solo si corresponde:
+
+```bash
+./venv/bin/python automations/stock-sync/scripts/process_meli_to_shopify_stock.py --apply --limit 1
+```
+
+## Como Saber Si La Prueba Fue Exitosa
+
+Para una prueba Shopify -> Mercado Libre sin apply, basta con:
+
+- [ ] El catcher estaba corriendo.
+- [ ] El tunnel `cloudflared` estaba activo.
+- [ ] Shopify tenia un webhook temporal apuntando al tunnel actual.
+- [ ] Se creo una orden real/manual de prueba.
+- [ ] El catcher imprimio `Raw event Shopify guardado`.
+- [ ] El catcher mostro el numero de orden real, no solo `#9999`.
+- [ ] SQLite mostro el evento en `raw_events`.
+- [ ] SQLite mostro una tarea nueva en `stock_tasks`.
+- [ ] El dry-run encontro el SKU en Mercado Libre.
+- [ ] El dry-run dejo la tarea en `ready_to_apply`.
+- [ ] No se ejecuto `--apply` si la prueba era solo de confirmacion.
+- [ ] La orden de prueba fue cancelada/reembolsada con restock en Shopify.
+- [ ] El webhook temporal fue eliminado o desactivado.
+- [ ] El tunnel y el catcher fueron detenidos.
+- [ ] La tarea local quedo neutralizada si estaba `ready_to_apply`.
+
+## Limpieza Rapida
+
+Al terminar una prueba local:
+
+1. Borrar o desactivar webhooks temporales que apunten a `trycloudflare.com`.
+2. Cerrar `cloudflared` con `Ctrl+C`.
+3. Cerrar `webhook_catcher.js` con `Ctrl+C`.
+4. Cancelar/reembolsar la orden de prueba si no era una venta real.
+5. Confirmar que Shopify devolvio el stock.
+6. No borrar `data/stock_sync.db` si se quiere conservar evidencia de la prueba.
+
+## Recordatorio Mental
+
+```text
+Webhook recibido = conectividad confirmada
+Tarea pending = catcher funciono
+Dry-run ready_to_apply = sincronizador entendio que haria
+Apply synced = stock real modificado
+```
+
+No hace falta llegar a `apply` para demostrar que el webhook local funciona.
