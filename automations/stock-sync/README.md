@@ -7,11 +7,11 @@ Automatizacion que sincroniza stock entre Shopify y Mercado Libre Chile usando w
 Validado localmente:
 
 - Shopify -> Mercado Libre funciona end-to-end.
-- Mercado Libre -> Shopify funciona end-to-end.
+- Mercado Libre -> Shopify funciona end-to-end usando orden real por `--order-id`.
 - Las tareas son idempotentes: reprocesar la misma orden no descuenta dos veces.
 - El modo `apply` vuelve a leer stock fresco antes de modificar inventario.
 
-Pendiente principal: montaje en servidor, dominio estable para webhooks, automatizacion recurrente, backups y alertas.
+Pendiente principal: validar que Mercado Libre envie webhooks reales al catcher, montaje en servidor, dominio estable para webhooks, automatizacion recurrente, backups y alertas.
 
 ## Modelo Mental
 

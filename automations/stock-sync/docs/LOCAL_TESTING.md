@@ -376,6 +376,8 @@ Tambien revisar manualmente el stock final en Shopify y Mercado Libre.
 
 ## Prueba Mercado Libre -> Shopify
 
+Estado actual: el procesador Meli -> Shopify ya fue validado con orden real usando `--order-id` y `--apply`, pero todavia falta confirmar que Mercado Libre envie un webhook real al catcher local/servidor. Hasta validar eso, tratar la recepcion de webhooks Meli como pendiente.
+
 El flujo Meli -> Shopify usa el mismo tunnel, pero el webhook temporal debe apuntar a:
 
 ```text

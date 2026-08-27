@@ -2,6 +2,7 @@
 
 ## Para Produccion Inicial
 
+- Validar recepcion real de webhooks desde Mercado Libre hacia `POST /webhooks/meli/orders`.
 - Montar en servidor estable.
 - Configurar dominio publico estable para webhooks.
 - Crear servicio permanente para `shopify_webhook_catcher.js`.
