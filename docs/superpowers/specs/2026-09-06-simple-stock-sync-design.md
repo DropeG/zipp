@@ -1,236 +1,257 @@
-# Simple Stock Sync Design
+# Simple Shopify and Mercado Libre Stock Sync
 
-## Objective
+## Goal
 
-Replace the current pair of loosely coordinated stock processors with one small, reliable worker while preserving the existing business rules:
+Keep Shopify and Mercado Libre stock aligned without building a large or complicated system.
 
-- Shopify is the inventory source of truth.
-- A paid Mercado Libre sale decreases Shopify inventory exactly once.
-- A Shopify sale causes Mercado Libre inventory to converge to Shopify's current quantity.
-- Ambiguous or missing SKUs never change inventory automatically.
+Shopify is the main stock record.
 
-The design keeps SQLite and the existing webhook server. It does not introduce Redis, Kafka, microservices, or another database.
-
-## Current Problems
-
-The current implementation has several correctness gaps:
-
-- The Shopify-to-Mercado-Libre processor can select Mercado Libre tasks because its queries do not filter by source.
-- Shopify-to-Mercado-Libre apply uses stock captured during dry-run instead of reading fresh Shopify stock.
-- Two overlapping workers can process the same task or race on the same SKU.
-- Rows marked `retryable_error` are not selected again.
-- A failed Mercado Libre raw event is given `processed_at`, which prevents retry.
-- Mercado Libre-to-Shopify uses a read-subtract-set sequence that can lose an adjustment under concurrency.
-- The same database and API concerns are duplicated across two large processors.
-
-## Proposed Architecture
+The central rule is:
 
 ```text
-Shopify/Mercado Libre webhook
-            |
-            v
-     authenticated receiver
-            |
-            v
-        SQLite jobs
-            |
-            v
-       one job worker
-            |
-      +-----+-------------------+
-      |                         |
-      v                         v
-Meli sale job             SKU reconcile job
-atomic Shopify -qty       read fresh Shopify stock
-with idempotency          set Mercado Libre stock
-      |                         |
-      +------------+------------+
-                   v
-             audit and status
+Mercado Libre orders update Shopify.
+Shopify product quantities update Mercado Libre.
 ```
 
-The webhook receiver only validates and persists work. One worker owns all external inventory mutations and dispatches behavior by explicit job type. This removes cross-processor task selection and makes concurrency rules enforceable in one place.
+## Why Orders Are Needed
 
-## Job Types
+When a product sells on Mercado Libre, Mercado Libre reduces its own stock. Shopify does not know about that sale.
 
-### `meli_order`
+Example:
 
-Created from a Mercado Libre order notification. The worker fetches the complete order because the notification does not contain all line details. Only a paid order is expanded into inventory work.
+```text
+Before sale:
+Shopify 10
+Meli    10
 
-Each valid order line creates a stable `meli_adjustment` job. Missing or ambiguous SKU data moves the relevant job to `needs_review` without changing stock.
+Meli sells 1:
+Shopify 10
+Meli     9
+```
 
-### `meli_adjustment`
+If we copied Shopify to Mercado Libre now, Mercado Libre would incorrectly return to 10. We must first read the Mercado Libre order and reduce Shopify to 9.
 
-Represents one paid Mercado Libre order line. Its stable identifier is derived from the Mercado Libre order and line identity.
+After Shopify knows about the sale, it is safe to copy Shopify's quantity to Mercado Libre.
 
-The worker applies `delta = -quantity_sold` through Shopify GraphQL `inventoryAdjustQuantities`. The job ID is also the Shopify idempotency key. Separate orders therefore accumulate correctly, while retrying the same order line does not deduct twice.
+## Simple Architecture
 
-After success, the affected SKU is marked for reconciliation.
+```text
+Shopify and Meli webhooks
+          |
+          v
+Verified webhook receiver
+          |
+          v
+      SQLite queue
+          |
+          v
+       One worker
+          |
+     +----+--------------------+
+     |                         |
+     v                         v
+Meli order                Shopify quantity
+reduces Shopify           copied to Meli
+```
 
-### `reconcile_sku`
+The system keeps SQLite. It does not need Redis, Kafka, microservices, or another database.
 
-Represents the request to make one Mercado Libre SKU match Shopify's current available quantity. Shopify order webhooks schedule this job directly. Successful Mercado Libre adjustments also schedule it so cross-channel event ordering converges to the same final inventory.
+## Part 1: Receive Webhooks Safely
 
-Reconciliation requests are coalesced by SKU. Several sales occurring close together result in one fresh Shopify read and one Mercado Libre write. If another request arrives while the SKU is being reconciled, the SKU remains dirty and is reconciled once more before becoming idle.
+The webhook receiver is the public door used by Shopify and Mercado Libre.
 
-## Queue State Machine
+It must:
+
+- reject requests that are too large;
+- verify Shopify's signature before trusting the message;
+- ignore duplicate webhook IDs;
+- check the expected Shopify store and webhook topic;
+- store the event before returning success;
+- treat Mercado Libre messages only as notices;
+- use the Mercado Libre API to fetch and verify the real order.
+
+The receiver only saves work. It does not change stock.
+
+## Part 2: Process Mercado Libre Sales
+
+When Mercado Libre reports an order, the worker:
+
+1. Fetches the real order from Mercado Libre.
+2. Confirms that it belongs to the expected seller.
+3. Confirms that the order is paid.
+4. Reads each product's exact SKU and sold quantity.
+5. Creates one unique job for each order line.
+6. Reduces Shopify stock by the quantity sold.
+7. Records the result.
+8. Requests a Shopify-to-Mercado-Libre quantity check for the affected SKU.
+
+The Shopify update must use the atomic `inventoryAdjustQuantities` GraphQL operation.
+
+Example:
+
+```text
+Meli order 123 sold SKU-A x 2
+Shopify adjustment: -2
+```
+
+The unique job ID is also sent to Shopify as the idempotency key. If the same job is retried, Shopify must not apply it twice.
+
+If the order is not paid, the worker does not change stock.
+
+If the SKU is missing or unclear, the job goes to human review.
+
+## Part 3: Process Shopify Sales
+
+Shopify already reduces its own stock when it receives an order.
+
+The worker must not subtract the quantity again. It only schedules a check for each affected SKU:
+
+```text
+Read fresh Shopify quantity
+        |
+        v
+Set Mercado Libre to that quantity
+```
+
+The quantity must be read immediately before the Mercado Libre update. The worker must never apply an old quantity saved during an earlier dry run.
+
+## Part 4: Combine Repeated Checks
+
+Several sales can happen close together. We do not need a separate Mercado Libre update for every sale.
+
+The queue keeps one pending quantity check per SKU. New requests for the same SKU are combined.
+
+Example:
+
+```text
+Three sales affect SKU-A
+        |
+        v
+One fresh Shopify read
+        |
+        v
+One Mercado Libre update
+```
+
+If another sale happens while the check is running, the SKU is checked one more time before it becomes idle.
+
+## Part 5: Daily Full Product Check
+
+Once a day, check every inventory-managed product shared between Shopify and Mercado Libre.
+
+The daily job runs in this order:
+
+1. Recover Mercado Libre orders that may have been missed.
+2. Apply any missing Mercado Libre sales to Shopify exactly once.
+3. Load every Shopify product with a managed SKU.
+4. Load every Mercado Libre listing using complete pagination.
+5. Match products by exact SKU.
+6. Compare their quantities.
+7. Update Mercado Libre when its quantity differs from Shopify.
+8. Record missing or duplicate SKUs for human review.
+
+The daily product check never changes Shopify. It only makes Mercado Libre match Shopify after missed Mercado Libre orders have been recovered.
+
+## Queue Rules
+
+There is one worker and one clear job flow:
 
 ```text
 pending
   -> processing
-       -> synced
-       -> retryable_error -> pending after backoff
-       -> needs_review
+       -> completed
+       -> retry later
+       -> needs review
 ```
 
-Each job stores:
+Before calling an external API, the worker claims the job in SQLite. Another worker cannot claim the same job at the same time.
 
-- stable job ID;
-- job type and source;
-- order and line identity where applicable;
-- SKU and quantity where applicable;
-- JSON payload needed for processing and audit;
-- status;
-- attempt count and next-attempt time;
-- processing lease owner and expiration;
-- last error;
-- creation and update timestamps.
+Each claim has an expiry time. If the worker crashes, the job becomes available again later.
 
-The worker claims one eligible job inside a SQLite `BEGIN IMMEDIATE` transaction. Claiming changes the status to `processing` and assigns a lease before any API call occurs. An expired lease returns to `pending`, allowing recovery after a crash.
+Temporary API and network errors are retried with increasing delays. Permanent problems and repeated failures go to human review.
 
-Only one `reconcile_sku` operation for a SKU can be active at a time. The initial deployment runs one worker process; the database claim still protects against accidental overlapping scheduler invocations.
+Jobs always include their type and source. A Shopify job cannot be processed as a Mercado Libre job.
 
-## Shopify Inventory Rules
+Only one stock operation for the same SKU runs at a time.
 
-### Mercado Libre sale
+## Product Matching Rules
 
-The worker does not calculate an absolute Shopify target locally. It submits an atomic negative adjustment:
-
-```text
-delta = -quantity_sold
-idempotency key = stable meli_adjustment job ID
-```
-
-The adjustment response and any user errors are recorded. A successful response completes the adjustment job and marks the SKU for reconciliation.
-
-### Shopify sale
-
-Shopify has already reduced its own inventory. The webhook therefore schedules only `reconcile_sku`; it does not subtract the sale quantity from either platform again.
-
-### Authoritative reconciliation
-
-At execution time, the worker reads fresh Shopify stock for the configured location, resolves exactly one Mercado Libre listing or supported variation by SKU, and sets Mercado Libre to the fresh Shopify quantity. No stock value captured by an earlier dry-run is used for production apply.
-
-## Reconciliation Coalescing
-
-The reconciliation table has one row per SKU with a monotonically increasing requested version and a completed version.
-
-When a sale requests reconciliation, the worker increments the requested version and sets a short future eligibility time. Repeated requests within that interval only advance the version and push the eligibility time; they do not create more rows.
-
-The reconciliation worker captures the requested version when it starts. After applying and confirming the Mercado Libre quantity:
-
-- if the requested version is unchanged, it records that version as completed;
-- if a newer request arrived during processing, it leaves the SKU eligible for another pass.
-
-This provides debouncing without losing activity that arrives during an API call.
-
-## Idempotency and Failure Handling
-
-- Webhook identity prevents duplicate incoming events.
-- Stable Mercado Libre order-line IDs prevent duplicate adjustment jobs.
-- Shopify idempotency keys prevent the same external adjustment from applying twice across retries.
-- Retryable network, rate-limit, and server errors use bounded exponential backoff.
-- Permanent validation errors move to `needs_review`.
-- A configurable maximum attempt count prevents infinite retries and moves exhausted jobs to `needs_review`.
-- Success is recorded only after the external API reports success and the expected postcondition is confirmed where the platform permits confirmation.
-
-Webhook events and jobs remain available as an audit trail. Retrying changes status and attempt metadata rather than creating a replacement identity.
-
-## Webhook Safety
-
-- Shopify webhook requests must pass HMAC verification using the raw request body.
-- Request bodies have an explicit size limit.
-- Mercado Libre notifications are treated as references only; the authenticated API response is the source for order status, seller, SKU, and quantity.
-- Notifications and orders for an unexpected seller are rejected or moved to `needs_review`.
-- The receiver returns success only after the event is durably stored.
-
-## SKU Resolution
-
-The first implementation keeps exact SKU matching and existing Mercado Libre SKU fallbacks. It does not perform fuzzy matching.
-
-- No match: record a skipped or reviewable outcome without changing stock.
-- More than one match: `needs_review`.
-- Unsupported Mercado Libre variation: `needs_review` until variation updates are explicitly implemented and tested.
-
-Full-catalog scans must not silently stop at 1,000 listings. The implementation may use complete pagination initially. A persistent SKU mapping or cache can be added later only if measurements show it is necessary.
+- Match products only by exact SKU.
+- Do not guess or use fuzzy matching.
+- One exact match can be processed.
+- No match is recorded without changing stock.
+- More than one match goes to human review.
+- Unsupported Mercado Libre variations go to human review.
+- Catalog loading must include every page; it must not stop silently after 1,000 listings.
 
 ## Dry Run
 
-Dry-run remains an operator command, not a production queue state. It evaluates a selected job or SKU using current platform data and prints the intended action without changing inventory or moving the production job through `ready_to_apply`.
+Dry run remains available for testing and investigation.
 
-Normal production processing validates and applies a claimed job in one workflow, avoiding stale values between two separately scheduled commands.
+It reads current information and shows the proposed action without changing stock. It is not a required step in the normal production queue.
 
-## Files and Boundaries
+Production jobs validate and apply their action in one run so an old dry-run value cannot be used later.
 
-The implementation will retain focused entry points while extracting shared responsibilities:
+## Files
 
-- `automations/stock-sync/scripts/shopify_webhook_catcher.js`: authenticate and persist webhook events only.
-- `automations/stock-sync/scripts/stock_sync_worker.py`: claim and dispatch jobs.
-- `automations/stock-sync/stock_sync/db.py`: schema, migrations, atomic claiming, leases, retry state, and reconciliation versions.
-- `automations/stock-sync/stock_sync/shopify.py`: Shopify GraphQL inventory reads and idempotent adjustments.
-- `automations/stock-sync/stock_sync/meli.py`: Mercado Libre order lookup, SKU resolution, inventory reads, and writes.
-- `automations/stock-sync/stock_sync/handlers.py`: the three job handlers and their business rules.
+The new version will use these main files:
 
-The existing processors remain available only during migration and are removed after equivalent tests and a controlled dry-run demonstrate the new worker behavior.
+- `automations/stock-sync/scripts/shopify_webhook_catcher.js`: verifies and saves webhooks.
+- `automations/stock-sync/scripts/stock_sync_worker.py`: runs and routes jobs.
+- `automations/stock-sync/stock_sync/db.py`: manages the queue, claims, retries, and logs.
+- `automations/stock-sync/stock_sync/shopify.py`: reads and adjusts Shopify inventory.
+- `automations/stock-sync/stock_sync/meli.py`: reads Mercado Libre orders and inventory.
+- `automations/stock-sync/stock_sync/handlers.py`: contains the simple rules for each job type.
 
-## Testing
+The two old processors will remain during testing. They will be removed only after the new worker passes the tests and controlled live checks.
 
-Automated tests must cover:
+## Tests Required
 
-- two Mercado Libre orders for the same SKU before processing;
-- duplicate delivery of the same Mercado Libre order;
-- two Shopify orders coalescing into one SKU reconciliation;
-- a Shopify and Mercado Libre sale arriving in either order;
-- an overlapping worker failing to claim an already leased job;
-- a crash after Shopify receives an adjustment and safe retry with the same idempotency key;
-- retryable event and task recovery;
-- a new reconciliation request arriving while reconciliation is processing;
-- fresh Shopify stock being read immediately before Mercado Libre apply;
-- missing SKU, duplicate SKU, unsupported variation, and absent listing behavior;
-- partial Mercado Libre API failures not being interpreted as missing products;
-- webhook HMAC rejection and request-size rejection.
+Tests must prove that:
 
-The existing ten Mercado Libre-to-Shopify tests remain as regression coverage until equivalent tests exist for the new worker.
+- two Mercado Libre orders for the same SKU both reduce Shopify;
+- the same Mercado Libre order cannot reduce Shopify twice;
+- several Shopify sales can be combined into one final Mercado Libre update;
+- Shopify and Mercado Libre sales can arrive in either order;
+- two workers cannot claim the same job;
+- a crashed or failed job can be retried safely;
+- fresh Shopify stock is used when updating Mercado Libre;
+- missing and duplicate SKUs never change stock;
+- temporary Mercado Libre API failures are not treated as missing products;
+- invalid Shopify webhook signatures are rejected;
+- excessively large webhook requests are rejected;
+- the daily check reads all product pages.
 
-## Deployment and Migration
+## Safe Rollout
 
 1. Back up `data/stock_sync.db`.
-2. Apply additive schema migrations; do not discard historical events, tasks, or logs.
-3. Run the new worker in dry-run against selected historical fixtures and current API reads.
-4. Stop both legacy processors before enabling mutation mode in the new worker.
-5. Apply one reviewed Mercado Libre adjustment and one Shopify reconciliation.
-6. Confirm both platform quantities and the audit records.
-7. Enable the single worker continuously.
-8. Keep a periodic full Shopify-to-Mercado-Libre reconciliation as a later operational safety job.
+2. Add the new queue fields without deleting old history.
+3. Run automated tests.
+4. Run the new worker in dry-run mode.
+5. Stop the two old processors.
+6. Test one reviewed Mercado Libre order.
+7. Test one Shopify-to-Mercado-Libre quantity update.
+8. Confirm the quantities and logs on both platforms.
+9. Enable the new worker continuously.
+10. Enable the daily full product check.
 
-Rollback consists of stopping the new worker and restoring operation with no automatic apply. External inventory mutations already confirmed before rollback remain auditable and are not automatically reversed.
+If a problem occurs, stop the worker. Previously confirmed stock changes remain in the audit log and are not automatically reversed.
 
-## Non-Goals
+## Not Included
 
-- Creating mirror orders in Shopify.
-- Synchronizing customer, payment, shipping, fulfillment, tax, or accounting data.
-- Automatically restoring inventory for cancellations and refunds.
-- Advanced multi-location allocation.
-- Replacing SQLite or deploying distributed infrastructure.
-- Publishing new Mercado Libre products.
+- Creating Mercado Libre mirror orders in Shopify.
+- Customer, payment, shipping, tax, or accounting sync.
+- Automatic cancellation or refund stock restoration.
+- Advanced multi-location stock allocation.
+- Product publishing.
+- New distributed infrastructure.
 
-## Acceptance Criteria
+## Done When
 
-- Each paid Mercado Libre order line decreases Shopify inventory no more than once.
-- Distinct Mercado Libre order lines for the same SKU all contribute their quantity without lost updates.
-- Shopify-originated sales never cause an additional Shopify decrement.
-- Mercado Libre converges to a fresh Shopify quantity regardless of event arrival order.
-- Duplicate events, worker overlap, temporary API failures, and worker crashes do not silently lose or duplicate inventory changes.
-- No worker can process a job owned by the opposite source or an unclaimed job.
-- Missing or ambiguous product identity never changes inventory automatically.
-- Production processing no longer depends on a stored dry-run stock value.
+- Every paid Mercado Libre order line reduces Shopify no more than once.
+- Separate Mercado Libre sales for the same SKU are all counted.
+- Shopify sales never reduce Shopify twice.
+- Mercado Libre receives a fresh Shopify quantity.
+- Duplicate events, temporary failures, overlapping workers, and crashes do not silently lose or duplicate stock changes.
+- Missing or unclear SKUs never change stock automatically.
+- The daily check examines all shared products and records its result.
