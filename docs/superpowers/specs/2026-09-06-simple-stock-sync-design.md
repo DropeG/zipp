@@ -146,31 +146,13 @@ Read fresh Shopify quantity
 Set Mercado Libre to that quantity
 ```
 
+Each order checks every affected SKU once. If another order for the same SKU arrives later, the worker checks that SKU again using fresh Shopify stock.
+
 The `mercadolibre` tag identifies imported orders in Shopify and makes their origin visible. Receiving Shopify's webhook for an imported order does not create another Shopify order and does not cause another inventory deduction.
 
 The quantity must be read immediately before the Mercado Libre update. The worker must never apply an old quantity saved during a dry run.
 
-## Part 4: Combine Repeated Quantity Checks
-
-Several sales can happen close together. We do not need a separate Mercado Libre update for every sale.
-
-The queue keeps one pending quantity check per SKU. New requests for the same SKU are combined.
-
-Example:
-
-```text
-Three sales affect SKU-A
-        |
-        v
-One fresh Shopify read
-        |
-        v
-One Mercado Libre update
-```
-
-If another sale happens while the check is running, the SKU is checked one more time before it becomes idle.
-
-## Part 5: Daily Full Product Check
+## Part 4: Daily Full Product Check
 
 Once a day, check every inventory-managed product shared between Shopify and Mercado Libre.
 
@@ -279,7 +261,7 @@ Tests must prove that:
 - unpaid Mercado Libre orders do not create Shopify orders;
 - one unsafe line prevents a partial Shopify order;
 - Shopify webhooks for imported orders do not reduce inventory again;
-- several Shopify sales can be combined into one final Mercado Libre update;
+- two Shopify orders for the same SKU are processed sequentially using fresh stock;
 - Shopify and Mercado Libre sales can arrive in either order;
 - two workers cannot claim the same job;
 - failed jobs can be retried safely;
