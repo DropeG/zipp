@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import timedelta
 
 import pytest
+
+
+def set_available_at(db, source_key: str, available_at: str) -> None:
+    with sqlite3.connect(db.path) as connection:
+        connection.execute(
+            "UPDATE jobs SET available_at = ? WHERE source_key = ?", (available_at, source_key)
+        )
 
 
 def test_duplicate_source_key_creates_one_job(db):
@@ -16,6 +24,8 @@ def test_duplicate_source_key_creates_one_job(db):
 def test_claim_is_atomic_and_respects_resource_lock(db, clock):
     db.enqueue_job("reconcile_sku", "order:1:ABC", {"sku": "ABC"}, "sku:ABC")
     db.enqueue_job("reconcile_sku", "order:2:ABC", {"sku": "ABC"}, "sku:ABC")
+    set_available_at(db, "order:1:ABC", "2026-09-06T00:00:00+00:00")
+    set_available_at(db, "order:2:ABC", "2026-09-06T00:00:00+00:00")
 
     first = db.claim_next_job(clock.now())
 
@@ -25,8 +35,16 @@ def test_claim_is_atomic_and_respects_resource_lock(db, clock):
     assert db.claim_next_job(clock.now()) is None
 
 
+def test_claim_does_not_lease_a_pending_job_before_it_is_due(db, clock):
+    db.enqueue_job("reconcile_sku", "order:future:ABC", {"sku": "ABC"}, "sku:ABC")
+    set_available_at(db, "order:future:ABC", "2026-09-06T00:05:00+00:00")
+
+    assert db.claim_next_job(clock.now()) is None
+
+
 def test_retry_makes_job_available_at_requested_time(db, clock):
     db.enqueue_job("import_meli_order", "meli:123", {"order_id": "123"}, "order:123")
+    set_available_at(db, "meli:123", "2026-09-06T00:00:00+00:00")
     job = db.claim_next_job(clock.now())
 
     db.retry_job(job.id, "timeout", clock.now(), delay_seconds=300)
@@ -39,6 +57,7 @@ def test_retry_makes_job_available_at_requested_time(db, clock):
 
 def test_expired_lease_becomes_retry_wait_before_claiming_next_job(db, clock):
     first_id = db.enqueue_job("reconcile_sku", "order:1:ABC", {"sku": "ABC"}, "sku:ABC")
+    set_available_at(db, "order:1:ABC", "2026-09-06T00:00:00+00:00")
     db.claim_next_job(clock.now())
 
     claimed = db.claim_next_job(clock.now() + timedelta(minutes=6))
@@ -49,6 +68,7 @@ def test_expired_lease_becomes_retry_wait_before_claiming_next_job(db, clock):
 
 def test_terminal_and_link_operations_persist_data(db, clock):
     job_id = db.enqueue_job("import_meli_order", "meli:123", {"order_id": "123"}, "order:123")
+    set_available_at(db, "meli:123", "2026-09-06T00:00:00+00:00")
     db.claim_next_job(clock.now())
 
     db.complete_job(job_id)

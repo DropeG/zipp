@@ -82,10 +82,8 @@ class Database:
                 row = connection.execute(
                     """
                     SELECT * FROM jobs AS candidate
-                    WHERE (
-                          candidate.status = 'pending'
-                          OR (candidate.status = 'retry_wait' AND candidate.available_at <= ?)
-                      )
+                    WHERE candidate.status IN ('pending', 'retry_wait')
+                      AND candidate.available_at <= ?
                       AND NOT EXISTS (
                           SELECT 1 FROM jobs AS locked
                           WHERE locked.resource_key = candidate.resource_key
