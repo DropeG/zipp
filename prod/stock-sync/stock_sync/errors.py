@@ -12,3 +12,7 @@ class ReviewRequiredError(RuntimeError):
         super().__init__(message)
         self.review_key = review_key
         self.details = details
+
+
+class OrderCreateRejectedError(ReviewRequiredError):
+    """Shopify explicitly returned no order and input validation userErrors."""

@@ -1,4 +1,4 @@
-const { createHmac, timingSafeEqual } = require("node:crypto");
+const { createHmac, randomUUID, timingSafeEqual } = require("node:crypto");
 const { mkdirSync, readFileSync } = require("node:fs");
 const { createServer } = require("node:http");
 const { dirname, join } = require("node:path");
@@ -161,13 +161,19 @@ function createReceiver(options) {
         const match = typeof notice.resource === "string" && /^\/orders\/(\d+)$/.exec(notice.resource);
         if (!match) throw new HttpError(400);
         const id = match[1];
+        // Delivery identity is separate from order-import identity. Without a
+        // provider notification ID, accepting a redundant recheck is safer
+        // than permanently dropping a later paid notification for this order.
+        const deliveryId = typeof notice._id === "string" && notice._id.trim()
+          ? notice._id : randomUUID();
+        const eventKey = `meli-notice:${id}:${deliveryId}`;
         saveEventAndJob(config.databasePath, {
           source: "meli",
-          eventKey: `meli-order:${id}`,
+          eventKey,
           payload: rawBody.toString("utf8"),
         }, {
           jobType: "import_meli_order",
-          sourceKey: `meli-order:${id}`,
+          sourceKey: eventKey,
           resourceKey: `order:${id}`,
           payload: JSON.stringify({ order_id: id }),
         });

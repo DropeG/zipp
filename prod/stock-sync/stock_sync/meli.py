@@ -175,10 +175,12 @@ class MeliClient:
             self._check_seller(seller_id)
             if _id(data["id"]) != str(order_id):
                 raise ValueError("order identifier")
+            status = _text(data["status"])
+            if status != "paid":
+                return MeliOrder(str(order_id), seller_id, status, "", [])
             processed_at = _text(data.get("date_closed") or data["date_created"])
             if datetime.fromisoformat(processed_at).tzinfo is None:
                 raise ValueError("order date timezone")
-            status = _text(data["status"])
             lines = []
             items: dict[str, dict[str, Any]] = {}
             for raw in _array(data["order_items"]):

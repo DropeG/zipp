@@ -169,7 +169,7 @@ test("rejects an authenticated Shopify body without an order ID", async (t) => {
 test("accepts a Mercado Libre order notice and queues the verified import", async (t) => {
   const receiver = await startReceiver();
   t.after(() => receiver.close());
-  const body = JSON.stringify({ resource: "/orders/2001", topic: "orders_v2" });
+  const body = JSON.stringify({ resource: "/orders/2001", topic: "orders_v2", _id: "notice-1" });
 
   const response = await receiver.postRaw("/webhooks/meli", body, { "x-webhook-token": "secret" });
 
@@ -177,7 +177,7 @@ test("accepts a Mercado Libre order notice and queues the verified import", asyn
   assert.equal(countRows(receiver.dbPath, "events"), 1);
   assert.deepEqual(jobFor(receiver.dbPath, "import_meli_order"), {
     job_type: "import_meli_order",
-    source_key: "meli-order:2001",
+    source_key: "meli-notice:2001:notice-1",
     resource_key: "order:2001",
     payload: JSON.stringify({ order_id: "2001" }),
   });
@@ -197,6 +197,35 @@ test("rejects Mercado Libre notices with an invalid token or resource", async (t
   assert.equal(badToken.status, 401);
   assert.equal(badResource.status, 400);
   assert.equal(countRows(receiver.dbPath, "events"), 0);
+});
+
+test("later Mercado Libre notification rechecks an order after an unpaid delivery completed", async (t) => {
+  const receiver = await startReceiver();
+  t.after(() => receiver.close());
+  const headers = { "x-webhook-token": "secret" };
+  const notice = { resource: "/orders/2001", topic: "orders_v2", _id: "notice-unpaid" };
+  assert.equal((await receiver.postRaw("/webhooks/meli", JSON.stringify(notice), headers)).status, 200);
+  const database = new DatabaseSync(receiver.dbPath);
+  database.exec("UPDATE jobs SET status = 'completed';");
+  database.close();
+  notice._id = "notice-paid";
+  assert.equal((await receiver.postRaw("/webhooks/meli", JSON.stringify(notice), headers)).status, 200);
+  assert.equal((await receiver.postRaw("/webhooks/meli", JSON.stringify(notice), headers)).status, 200);
+  const read = new DatabaseSync(receiver.dbPath);
+  assert.equal(read.prepare("SELECT COUNT(*) AS n FROM jobs WHERE status = 'pending'").get().n, 1);
+  assert.equal(read.prepare("SELECT COUNT(*) AS n FROM jobs WHERE resource_key = 'order:2001'").get().n, 2);
+  assert.equal(countRows(receiver.dbPath, "events"), 2);
+  read.close();
+});
+
+test("Mercado Libre notices without delivery identity cannot permanently suppress future rechecks", async (t) => {
+  const receiver = await startReceiver();
+  t.after(() => receiver.close());
+  const body = JSON.stringify({ resource: "/orders/2001", topic: "orders_v2" });
+  for (let n = 0; n < 2; n++) {
+    assert.equal((await receiver.postRaw("/webhooks/meli", body, { "x-webhook-token": "secret" })).status, 200);
+  }
+  assert.equal(countRows(receiver.dbPath, "jobs"), 2);
 });
 
 test("returns 503 and rolls back the event when SQLite cannot save its job", async (t) => {

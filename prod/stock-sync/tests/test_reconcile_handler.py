@@ -36,11 +36,20 @@ class FakeShopify:
             raise self.review_error
         self.order_reviews[(order_id, review_key)] = note
 
-    def create_or_update_review(self, review_key, note):
+    def create_or_update_review(self, review_key, note, *, draft_id=None):
         if self.review_error:
             raise self.review_error
         self.draft_reviews[review_key] = note
         return "gid://shopify/DraftOrder/99"
+
+    def resolve_review(self, review_key, *, draft_id=None, shopify_order_id=None):
+        self.draft_reviews.pop(review_key, None)
+
+    def get_order_skus(self, order_id):
+        return ["ABC"]
+
+    def resolve_order_review(self, order_id, review_key):
+        self.order_reviews.pop((order_id, review_key), None)
 
     def find_variants_by_skus(self, skus):
         return {sku: [ShopifyVariant("gid://shopify/ProductVariant/1", sku, self.quantity, True)] for sku in skus}
@@ -210,11 +219,11 @@ def test_equal_quantity_does_not_write(ctx):
     assert ctx.meli.quantity_writes == []
 
 
-@pytest.mark.parametrize("meli_quantity, expected_status", [(0, "unchanged"), (2, "updated")])
-def test_negative_shopify_stock_compares_against_sellable_zero(ctx, meli_quantity, expected_status):
+@pytest.mark.parametrize("meli_quantity", [0, 2])
+def test_negative_shopify_stock_compares_against_sellable_zero(ctx, meli_quantity):
     ctx.shopify.quantity = -2
     ctx.meli.listings = [replace(ctx.meli.listings[0], available_quantity=meli_quantity)]
-    assert run(ctx)["status"] == expected_status
+    assert run(ctx)["status"] == "needs_review"
     assert ctx.meli.listings[0].available_quantity == 0
 
 

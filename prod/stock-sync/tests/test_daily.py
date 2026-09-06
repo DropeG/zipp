@@ -53,14 +53,17 @@ class Shopify:
             self.catalog = [replace(v, available_quantity=v.available_quantity-line.quantity) if v.sku == line.sku else v for v in self.catalog]
         return self.orders[order.order_id]
 
-    def create_or_update_review(self, review_key, note):
+    def create_or_update_review(self, review_key, note, *, draft_id=None):
         if self.review_error:
             raise self.review_error
         self.reviews[review_key] = note
         return f"draft:{review_key}"
 
-    def resolve_review(self, review_key):
+    def resolve_review(self, review_key, *, draft_id=None, shopify_order_id=None):
         self.resolved.append(review_key)
+
+    def get_order_skus(self, order_id):
+        return ["ABC"]
 
 
 class Meli:

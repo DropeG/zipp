@@ -41,6 +41,8 @@ class FakeShopify:
         self.variant_errors = {}
         self.create_error = None
         self.review_error = None
+        self.order_skus = ["ABC"]
+        self.resolved = []
 
     def find_variants_by_skus(self, skus):
         result = {}
@@ -62,11 +64,17 @@ class FakeShopify:
         self.existing_order_id = "gid://shopify/Order/77"
         return self.existing_order_id
 
-    def create_or_update_review(self, review_key, note):
+    def create_or_update_review(self, review_key, note, *, draft_id=None):
         self.review_calls.append((review_key, note))
         if self.review_error:
             raise self.review_error
         return "gid://shopify/DraftOrder/91"
+
+    def resolve_review(self, review_key, *, draft_id=None, shopify_order_id=None):
+        self.resolved.append((review_key, shopify_order_id))
+
+    def get_order_skus(self, order_id):
+        return self.order_skus
 
 
 @pytest.fixture
@@ -158,6 +166,7 @@ def test_retry_uses_local_link_and_repairs_missing_reconcile_jobs(ctx):
     ctx.db.link_order("2001", "gid://shopify/Order/77")
     ctx.db.enqueue_job("reconcile_sku", "shopify-order:77:ABC", {"sku": "ABC"}, "sku:ABC")
     ctx.meli.order = replace(ctx.meli.order, lines=[line(), line("XYZ")])
+    ctx.shopify.order_skus = ["ABC", "XYZ"]
     run(ctx)
     run(ctx)
     assert ctx.shopify.lookups == []
@@ -232,7 +241,8 @@ def test_meli_permanent_validation_error_becomes_order_review(ctx, dry_run):
     if dry_run:
         assert_no_business_mutations(ctx)
     else:
-        assert ctx.shopify.review_calls == [("order:2001", "invalid unit price")]
+        assert ctx.shopify.review_calls[0][0] == "order:2001"
+        assert "invalid unit price" in ctx.shopify.review_calls[0][1]
         assert ctx.db.get_job(ctx.job.id).status == "needs_review"
 
 

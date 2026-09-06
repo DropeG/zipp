@@ -51,7 +51,7 @@ class Shopify:
         if self.review_error:
             raise self.review_error
 
-    def create_or_update_review(self, key, note):
+    def create_or_update_review(self, key, note, *, draft_id=None):
         self._review()
         self.drafts[key] = note
         return 'gid://shopify/DraftOrder/99'
@@ -63,8 +63,14 @@ class Shopify:
     def list_all_variants(self):
         return [ShopifyVariant('gid://shopify/ProductVariant/1', 'ABC', self.quantity, True)]
 
-    def resolve_review(self, key):
+    def resolve_review(self, key, *, draft_id=None, shopify_order_id=None):
         self.drafts.pop(key, None)
+
+    def get_order_skus(self, order_id):
+        return ["ABC"]
+
+    def resolve_order_review(self, order_id, key):
+        self.order_reviews.pop((order_id, key), None)
 
 
 class Meli:

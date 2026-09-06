@@ -115,16 +115,31 @@ def test_get_order_rejects_wrong_seller(meli, session):
     assert caught.value.review_key == "order:2001"
 
 
-@pytest.mark.parametrize("status", ["paid", "payment_required", "cancelled"])
-def test_get_order_preserves_status_and_exact_lines(meli, session, status):
-    payload = order(status=status)
+@pytest.mark.parametrize("status", ["cancelled", "payment_required"])
+def test_non_paid_order_skips_malformed_lines_and_dates(meli, session, status):
+    session.queue({"id": 2001, "seller": {"id": 100}, "status": status,
+                   "order_items": [{"quantity": "broken"}]})
+    result = meli.get_order("2001")
+    assert result.status == status
+    assert result.lines == []
+    assert len(session.calls) == 1
+
+
+def test_non_paid_order_still_verifies_seller(meli, session):
+    session.queue({"id": 2001, "seller": {"id": 999}, "status": "cancelled"})
+    with pytest.raises(ReviewRequiredError, match="seller"):
+        meli.get_order("2001")
+
+
+def test_paid_order_preserves_status_and_exact_lines(meli, session):
+    payload = order(status="paid")
     payload["order_items"].append({"item": {"id": "MLC2", "title": "Other", "variation_id": 9,
                                             "seller_custom_field": " ABC "},
                                    "quantity": 1, "unit_price": "10.50", "currency_id": "USD"})
     session.queue(payload)
     result = meli.get_order("2001")
     assert (result.order_id, result.seller_id, result.status, result.processed_at) == (
-        "2001", "100", status, "2026-09-06T12:00:00.000-04:00")
+        "2001", "100", "paid", "2026-09-06T12:00:00.000-04:00")
     assert result.lines == [MeliOrderLine("MLC1", None, "Widget", 2, "12990", "CLP", "ABC"),
                             MeliOrderLine("MLC2", "9", "Other", 1, "10.50", "USD", " ABC ")]
     assert len(session.calls) == 1
@@ -369,11 +384,13 @@ def test_missing_token_file_requires_review(meli, session, tokens_file):
     assert session.calls == []
 
 
-def test_unpaid_order_without_closed_date_uses_creation_date(meli, session):
+def test_unpaid_order_without_closed_date_does_not_need_import_details(meli, session):
     payload = order(status="payment_required")
     payload["date_closed"] = None
     session.queue(payload)
-    assert meli.get_order("2001").processed_at == "2026-09-06T11:00:00.000-04:00"
+    result = meli.get_order("2001")
+    assert result.status == "payment_required"
+    assert result.lines == []
 
 
 def test_sku_fallback_rejects_item_from_another_seller(meli, session):

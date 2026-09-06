@@ -6,7 +6,7 @@ from typing import Any, Protocol
 import requests
 
 from .config import Settings
-from .errors import RetryableSyncError, ReviewRequiredError
+from .errors import OrderCreateRejectedError, RetryableSyncError, ReviewRequiredError
 from .models import MeliOrder, ShopifyVariant
 
 
@@ -211,6 +211,11 @@ class ShopifyClient:
                 f"Shopify SKU {sku!r} must match exactly one variant, found {len(variants)}",
                 {"operation": "get_available_quantity", "fields": ["sku"]},
             )
+        if variants[0].inventory_tracked is not True:
+            raise ReviewRequiredError(
+                f"sku:{sku}", f"Shopify SKU {sku!r}: inventory must be tracked",
+                {"operation": "get_available_quantity", "fields": ["inventoryItem", "tracked"]},
+            )
         return variants[0].available_quantity
 
     def find_imported_order(self, meli_order_id: str) -> str | None:
@@ -278,12 +283,66 @@ class ShopifyClient:
                 },
             },
         )
-        result = self._mutation_result("create_imported_order", data, "orderCreate", f"order:{order.order_id}")
-        return str(result["order"]["id"])
+        try:
+            result = self._mutation_result("create_imported_order", data, "orderCreate", f"order:{order.order_id}")
+        except ReviewRequiredError as error:
+            outcome = data.get("orderCreate")
+            if (isinstance(outcome, dict) and "order" in outcome and outcome["order"] is None
+                    and isinstance(outcome.get("userErrors"), list) and outcome["userErrors"]):
+                raise OrderCreateRejectedError(error.review_key, str(error), error.details) from error
+            raise
+        created = result.get("order")
+        if not isinstance(created, dict) or not isinstance(created.get("id"), str) or not created["id"].startswith("gid://shopify/Order/"):
+            raise ReviewRequiredError(f"order:{order.order_id}", "Shopify creation returned no usable order ID; reconcile before retry", {})
+        return created["id"]
 
-    def create_or_update_review(self, review_key: str, note: str) -> str:
+    def get_order_skus(self, order_id: str) -> list[str]:
+        """Repair queue entries from the real order, not historical Meli data."""
+        skus = set()
+        after = None
+        seen_cursors = set()
+        while True:
+            data = self.transport.execute(
+                "get_order_skus",
+                """
+                query OrderSkus($id: ID!, $after: String) {
+                  order(id: $id) {
+                    id
+                    lineItems(first: 100, after: $after) {
+                      nodes { sku title quantity }
+                      pageInfo { hasNextPage endCursor }
+                    }
+                  }
+                }
+                """, {"id": order_id, "after": after},
+            )
+            try:
+                order = data["order"]
+                if order["id"] != order_id:
+                    raise ValueError("order not found")
+                page = order["lineItems"]
+                nodes, info = page["nodes"], page["pageInfo"]
+                if not isinstance(nodes, list) or not nodes or type(info["hasNextPage"]) is not bool:
+                    raise ValueError("missing order lines or pagination")
+                for node in nodes:
+                    sku = node["sku"]
+                    if not isinstance(sku, str) or not sku.strip():
+                        raise ValueError(f"missing SKU: title={node.get('title')!r}, quantity={node.get('quantity')!r}")
+                    skus.add(sku)
+                if not info["hasNextPage"]:
+                    return sorted(skus)
+                after = info["endCursor"]
+                if not isinstance(after, str) or not after or after in seen_cursors:
+                    raise ValueError("incomplete order pagination")
+                seen_cursors.add(after)
+            except (KeyError, TypeError, ValueError) as error:
+                raise ReviewRequiredError(order_id, f"Cannot read Shopify order SKUs: {error}", {}) from error
+
+    def create_or_update_review(self, review_key: str, note: str, *, draft_id: str | None = None) -> str:
         stable_tag = self._review_tag(review_key)
-        existing = self._find_review(stable_tag)
+        existing = self._get_review(draft_id) if draft_id else None
+        if existing is None:
+            existing = self._find_review(stable_tag)
         tags = self._review_tags(stable_tag)
         if existing is None:
             data = self.transport.execute(
@@ -301,7 +360,7 @@ class ShopifyClient:
             result = self._mutation_result("create_review", data, "draftOrderCreate", review_key)
             return str(result["draftOrder"]["id"])
 
-        draft_id, old_tags = existing
+        draft_id, old_tags, _ = existing
         data = self.transport.execute(
             "update_review",
             """
@@ -316,19 +375,23 @@ class ShopifyClient:
                 "id": draft_id,
                 "input": {
                     "note": note,
-                    "tags": self._merged_tags(old_tags, tags),
+                    "tags": self._merged_tags([tag for tag in old_tags if tag != "meli-review-resolved"], tags),
                 }
             },
         )
         result = self._mutation_result("update_review", data, "draftOrderUpdate", review_key)
         return str(result["draftOrder"]["id"])
 
-    def resolve_review(self, review_key: str) -> None:
+    def resolve_review(
+        self, review_key: str, *, draft_id: str | None = None, shopify_order_id: str | None = None,
+    ) -> None:
         stable_tag = self._review_tag(review_key)
-        existing = self._find_review(stable_tag)
+        existing = self._get_review(draft_id) if draft_id else None
+        if existing is None:
+            existing = self._find_review(stable_tag)
         if existing is None:
             return
-        draft_id, old_tags = existing
+        draft_id, old_tags, existing_note = existing
         tags = [tag for tag in old_tags if tag != "meli-needs-review"]
         tags = self._merged_tags(tags, ["meli-review-resolved"])
         data = self.transport.execute(
@@ -341,12 +404,16 @@ class ShopifyClient:
               }
             }
             """,
-            {"id": draft_id, "input": {"tags": tags}},
+            {"id": draft_id, "input": {
+                "tags": tags,
+                **({"note": self._append_note(existing_note, f"Resolved: Mercado Libre review {review_key}; imported Shopify order {shopify_order_id}.")}
+                   if shopify_order_id else {}),
+            }},
         )
         self._mutation_result("resolve_review", data, "draftOrderUpdate", review_key)
 
     def mark_order_review(self, order_id: str, review_key: str, note: str) -> None:
-        stable_tag = self._review_tag(review_key)
+        stable_tag = f"meli-review-{review_key}"
         existing_tags, existing_note = self._find_order(order_id)
         data = self.transport.execute(
             "mark_order_review",
@@ -362,18 +429,55 @@ class ShopifyClient:
                 "input": {
                     "id": order_id,
                     "note": self._append_note(existing_note, note),
-                    "tags": self._merged_tags(existing_tags, self._review_tags(stable_tag)),
+                    "tags": self._merged_tags([tag for tag in existing_tags if tag != "meli-review-resolved"],
+                                              self._review_tags(stable_tag)),
                 }
             },
         )
         self._mutation_result("mark_order_review", data, "orderUpdate", review_key)
 
-    def _find_review(self, stable_tag: str) -> tuple[str, list[str]] | None:
+    def resolve_order_review(self, order_id: str, review_key: str) -> None:
+        # Retain the problem type: sku:77 and shopify-order:77 are independent.
+        stable_tag = f"meli-review-{review_key}"
+        old_tags, note = self._find_order(order_id)
+        if stable_tag not in old_tags:
+            return
+        tags = [tag for tag in old_tags if tag != stable_tag]
+        if not any(tag.startswith("meli-review-") and tag != "meli-review-resolved" for tag in tags):
+            tags = [tag for tag in tags if tag != "meli-needs-review"]
+            tags = self._merged_tags(tags, ["meli-review-resolved"])
+        data = self.transport.execute(
+            "resolve_order_review",
+            """
+            mutation ResolveOrderReview($input: OrderInput!) {
+              orderUpdate(input: $input) { order { id } userErrors { field message } }
+            }
+            """, {"input": {"id": order_id, "tags": tags,
+                              "note": self._append_note(note, f"Resolved stock sync problem: {review_key}.")}},
+        )
+        self._mutation_result("resolve_order_review", data, "orderUpdate", review_key)
+
+    def _get_review(self, draft_id: str) -> tuple[str, list[str], str] | None:
+        data = self.transport.execute(
+            "get_review",
+            "query GetReview($id: ID!) { node(id: $id) { ... on DraftOrder { id tags note2 } } }",
+            {"id": draft_id},
+        )
+        if "node" not in data:
+            raise ReviewRequiredError(draft_id, "Cannot safely load linked review draft", {})
+        node = data.get("node")
+        if node is None:
+            return None  # Deleted links can fall back to discovery.
+        if not isinstance(node, dict) or node.get("id") != draft_id or not isinstance(node.get("tags"), list):
+            raise ReviewRequiredError(draft_id, "Cannot safely load linked review draft", {})
+        return draft_id, node["tags"], str(node.get("note2") or "")
+
+    def _find_review(self, stable_tag: str) -> tuple[str, list[str], str] | None:
         data = self.transport.execute(
             "find_review",
             """
             query FindReview($query: String!) {
-              draftOrders(first: 1, query: $query) { nodes { id tags } }
+              draftOrders(first: 1, query: $query) { nodes { id tags note2 } }
             }
             """,
             {"query": f"tag:{stable_tag}"},
@@ -381,7 +485,7 @@ class ShopifyClient:
         nodes = data["draftOrders"].get("nodes", [])
         if not nodes:
             return None
-        return str(nodes[0]["id"]), [str(tag) for tag in nodes[0].get("tags", [])]
+        return str(nodes[0]["id"]), [str(tag) for tag in nodes[0].get("tags", [])], str(nodes[0].get("note2") or "")
 
     def _find_order(self, order_id: str) -> tuple[list[str], str]:
         data = self.transport.execute(

@@ -12,6 +12,12 @@ python3.14 -m venv venv
 cp prod/stock-sync/.env.example prod/stock-sync/.env
 ```
 
+Para ejecutar las pruebas en una instalacion limpia, instale tambien pytest:
+
+```bash
+./venv/bin/python -m pip install pytest
+```
+
 Complete `prod/stock-sync/.env` y carguelo antes de iniciar el receiver o el worker:
 
 ```bash
@@ -81,6 +87,12 @@ Inicie el receiver y el worker como procesos separados. Nginx entrega los dos pr
 ```
 
 Corrija el producto o SKU indicado antes de reintentar su `JOB_ID`. Un trabajo en `needs_review` no se aplica automaticamente. Los mensajes de salida y `sync_logs` de SQLite son el registro operativo; evite imprimir o copiar valores de tokens.
+
+Las notificaciones de Mercado Libre se deduplican por su `_id` de entrega. Cada notificacion posterior puede volver a consultar la misma orden; el enlace local de orden evita importar otra venta. Sin `_id`, se acepta una nueva consulta por entrega.
+
+Antes de enviar `orderCreate`, el worker guarda un registro en `order_creates`. Si Shopify pudo aceptar la orden pero se pierde la respuesta, una busqueda sin resultado no autoriza otra creacion. El trabajo requiere conciliacion humana y `retry JOB_ID` solo vuelve a buscar la orden existente. Verifique en Shopify la etiqueta `meli-order-ID` y el identificador de origen; cuando esa orden sea visible, el reintento guarda su enlace y resuelve el borrador incluyendo el ID Shopify. No borre el registro de intento para forzar otra orden: si no se puede probar el resultado, mantenga el trabajo en revision. Una respuesta explicita de validacion con `order: null` y `userErrors` permite corregir el problema y reintentar la creacion.
+
+Los problemas de una orden real se resuelven por separado: reparar un SKU conserva cualquier otro problema pendiente en esa orden. Un stock Shopify negativo se copia a Mercado Libre como cero y mantiene una revision de faltante en la orden real hasta corregirlo. Los borradores usan primero su enlace SQLite y conservan sus notas al resolverse.
 
 Ejecute la revision diaria primero sin cambios y revise el JSON `planned_updates`:
 

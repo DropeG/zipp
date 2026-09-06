@@ -40,6 +40,20 @@ CREATE TABLE IF NOT EXISTS review_links (
     updated_at TEXT NOT NULL
 );
 
+-- Written before orderCreate. A row without an order link means creation may
+-- have succeeded; a search miss can never authorize another create attempt.
+CREATE TABLE IF NOT EXISTS order_creates (
+    meli_order_id TEXT PRIMARY KEY,
+    started_at TEXT NOT NULL
+);
+
+-- Outstanding problems are tracked independently on each real Shopify order.
+CREATE TABLE IF NOT EXISTS order_review_links (
+    shopify_order_id TEXT NOT NULL,
+    review_key TEXT NOT NULL,
+    PRIMARY KEY (shopify_order_id, review_key)
+);
+
 CREATE TABLE IF NOT EXISTS sync_logs (
     id INTEGER PRIMARY KEY,
     job_id INTEGER,

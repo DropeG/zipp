@@ -184,6 +184,62 @@ class Database:
             ).fetchone()
         return None if row is None else str(row["shopify_order_id"])
 
+    def begin_order_create(self, meli_order_id: str) -> bool:
+        with self._connect() as connection:
+            result = connection.execute(
+                "INSERT OR IGNORE INTO order_creates (meli_order_id, started_at) VALUES (?, ?)",
+                (meli_order_id, self._now()),
+            )
+        return bool(result.rowcount)
+
+    def has_order_create(self, meli_order_id: str) -> bool:
+        with self._connect() as connection:
+            return connection.execute(
+                "SELECT 1 FROM order_creates WHERE meli_order_id = ?", (meli_order_id,),
+            ).fetchone() is not None
+
+    def clear_rejected_order_create(self, meli_order_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute("DELETE FROM order_creates WHERE meli_order_id = ?", (meli_order_id,))
+
+    def complete_import_reviews(self, meli_order_id: str) -> None:
+        """A later notice can repair the import reviewed by an earlier job."""
+        with self._connect() as connection:
+            connection.execute(
+                """UPDATE jobs SET status = 'completed', last_error = NULL,
+                       lease_until = NULL, updated_at = ?
+                   WHERE job_type = 'import_meli_order' AND resource_key = ?
+                     AND (status = 'needs_review' OR EXISTS (
+                       SELECT 1 FROM checkpoints WHERE checkpoint_key = 'worker_review:' || jobs.id))""",
+                (self._now(), f"order:{meli_order_id}"),
+            )
+            connection.execute(
+                """DELETE FROM checkpoints WHERE checkpoint_key IN (
+                     SELECT 'worker_review:' || id FROM jobs
+                     WHERE job_type = 'import_meli_order' AND resource_key = ?)""",
+                (f"order:{meli_order_id}",),
+            )
+
+    def record_order_review(self, order_id: str, review_key: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO order_review_links VALUES (?, ?)", (order_id, review_key),
+            )
+
+    def has_order_review(self, order_id: str, review_key: str) -> bool:
+        with self._connect() as connection:
+            return connection.execute(
+                "SELECT 1 FROM order_review_links WHERE shopify_order_id = ? AND review_key = ?",
+                (order_id, review_key),
+            ).fetchone() is not None
+
+    def clear_order_review(self, order_id: str, review_key: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM order_review_links WHERE shopify_order_id = ? AND review_key = ?",
+                (order_id, review_key),
+            )
+
     def link_review(self, review_key: str, shopify_draft_order_id: str) -> None:
         now = self._now()
         with self._connect() as connection:

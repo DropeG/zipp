@@ -10,6 +10,7 @@ from .errors import ReviewRequiredError
 from .handlers import handle_import_meli_order
 from .meli import MeliClient
 from .models import Job, MeliListing, ShopifyVariant
+from .reviews import publish_draft, resolve_draft
 from .shopify import ShopifyClient
 
 
@@ -102,8 +103,7 @@ def run_daily(
 
     def review(key: str, note: str) -> None:
         if not dry_run:
-            draft_id = shopify.create_or_update_review(key, note)
-            db.link_review(key, draft_id)
+            publish_draft(db, shopify, key, note)
         result.review_keys.append(key)
         result.status = "needs_review"
 
@@ -146,6 +146,6 @@ def run_daily(
             # SKU reviews remain stable across changes in problem type. Entity
             # reviews also resolve when a previously blank SKU is repaired.
             for review_key in (key, _entity_review_key(matches[0]), _entity_review_key(target)):
-                shopify.resolve_review(review_key)
+                resolve_draft(db, shopify, review_key)
 
     return result

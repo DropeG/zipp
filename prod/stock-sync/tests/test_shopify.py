@@ -50,6 +50,8 @@ def default_reply(operation: str) -> dict[str, Any]:
         return {"orderCreate": {"order": {"id": "gid://shopify/Order/77"}, "userErrors": []}}
     if operation == "find_review":
         return {"draftOrders": {"nodes": []}}
+    if operation == "get_review":
+        return {"node": {"id": "gid://shopify/DraftOrder/91", "tags": ["mercadolibre", "meli-needs-review", "meli-review-2001"]}}
     if operation == "find_order":
         return {
             "node": {
@@ -221,6 +223,14 @@ def test_duplicate_sku_returns_both_variants(shopify, transport):
     assert shopify.find_variants_by_skus({"ABC"}) == {
         "ABC": [variant("ABC", 11), variant("ABC", 22)]
     }
+
+
+def test_quantity_read_rejects_untracked_inventory(shopify, transport):
+    page = variant_page("ABC", 11)
+    page["productVariants"]["nodes"][0]["inventoryItem"]["tracked"] = False
+    transport.pages = [page]
+    with pytest.raises(ReviewRequiredError, match="tracked"):
+        shopify.get_available_quantity("ABC")
 
 
 def test_variant_lookup_quotes_and_escapes_special_character_skus(shopify, transport):
@@ -403,7 +413,7 @@ def test_mark_order_review_updates_existing_real_order(shopify, transport):
     assert transport.last_variables["input"] == {
         "id": "gid://shopify/Order/77",
         "note": "Existing order note\n\nNeeds human review",
-        "tags": ["existing-tag", "mercadolibre", "meli-needs-review", "meli-review-2001"],
+        "tags": ["existing-tag", "mercadolibre", "meli-needs-review", "meli-review-order:2001"],
     }
 
 

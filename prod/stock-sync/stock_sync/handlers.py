@@ -4,9 +4,10 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from .db import Database
-from .errors import ReviewRequiredError
+from .errors import OrderCreateRejectedError, ReviewRequiredError
 from .meli import MeliClient
 from .models import Job, MeliOrder, ShopifyVariant
+from .reviews import mark_order, publish_draft, resolve_draft, resolve_order
 from .shopify import ShopifyClient
 
 
@@ -61,15 +62,44 @@ def _validate_import(
 
 def _import_review(
     job: Job, order_id: str, problems: list[str], db: Database,
-    shopify: ShopifyClient, dry_run: bool,
+    shopify: ShopifyClient, dry_run: bool, order: MeliOrder | None = None,
 ) -> dict[str, Any]:
     review_key = f"order:{order_id}"
     if not dry_run:
-        note = "\n".join(problems)
-        draft_id = shopify.create_or_update_review(review_key, note)
-        db.link_review(review_key, draft_id)
+        context = [f"Mercado Libre order {order_id}; attempts: {job.attempts}"]
+        if order:
+            context.extend(f"Item {line.item_id}, variation {line.variation_id}, SKU {line.sku!r}, "
+                           f"title {line.title!r}, quantity {line.quantity}" for line in order.lines)
+        note = "\n".join([*context, *problems])
+        linked_order = db.get_order_link(order_id)
+        if linked_order:
+            mark_order(db, shopify, linked_order, review_key, note)
+        else:
+            publish_draft(db, shopify, review_key, note)
         db.needs_review(job.id, review_key, note)
     return {"status": "needs_review", "order_id": order_id, "problems": problems}
+
+
+def _finish_import(job, order_id, shopify_order_id, db, shopify, dry_run, skus=None):
+    if not dry_run:
+        db.link_order(order_id, shopify_order_id)
+        resolve_draft(db, shopify, f"order:{order_id}", shopify_order_id)
+    try:
+        if skus is None:
+            skus = shopify.get_order_skus(shopify_order_id)
+    except ReviewRequiredError as error:
+        return _import_review(job, order_id, [str(error)], db, shopify, dry_run)
+    if not dry_run:
+        numeric_order_id = shopify_order_id.rsplit("/", 1)[-1]
+        for sku in sorted(skus):
+            db.enqueue_job(
+                "reconcile_sku", f"shopify-order:{numeric_order_id}:{sku}",
+                {"sku": sku, "shopify_order_id": shopify_order_id}, f"sku:{sku}",
+            )
+        resolve_order(db, shopify, shopify_order_id, f"order:{order_id}")
+        db.complete_import_reviews(order_id)
+    return {"status": "dry_run" if dry_run else "imported", "order_id": order_id,
+            "shopify_order_id": shopify_order_id}
 
 
 def handle_import_meli_order(
@@ -83,6 +113,16 @@ def handle_import_meli_order(
     resource key; persistent links and Shopify lookup recover interrupted work.
     """
     order_id = str(job.payload["order_id"])
+    shopify_order_id = db.get_order_link(order_id)
+    if shopify_order_id is None:
+        shopify_order_id = shopify.find_imported_order(order_id)
+    if shopify_order_id:
+        return _finish_import(job, order_id, shopify_order_id, db, shopify, dry_run)
+    if db.has_order_create(order_id):
+        return _import_review(job, order_id, [
+            "Shopify order creation may have succeeded but no matching order is visible. "
+            "Human reconciliation required; retry only searches for the existing order and never creates another."
+        ], db, shopify, dry_run)
     try:
         order = meli.get_order(order_id)
     except ReviewRequiredError as error:
@@ -93,13 +133,9 @@ def handle_import_meli_order(
 
     variants, problems = _validate_import(order, shopify)
     if problems:
-        return _import_review(job, order_id, problems, db, shopify, dry_run)
+        return _import_review(job, order_id, problems, db, shopify, dry_run, order)
 
     try:
-        shopify_order_id = db.get_order_link(order_id)
-        if shopify_order_id is None:
-            shopify_order_id = shopify.find_imported_order(order_id)
-
         if dry_run:
             return {
                 "status": "dry_run",
@@ -114,21 +150,20 @@ def handle_import_meli_order(
                 "inventory_behaviour": "DECREMENT_IGNORING_POLICY",
             }
 
-        if shopify_order_id is None:
-            shopify_order_id = shopify.create_imported_order(order, variants)
+        # This intent commits before any potentially accepted orderCreate call.
+        # Keep it after every failure, including response loss or process death.
+        # No provider idempotency guarantee exists in this API contract.
+        if not db.begin_order_create(order_id):
+            return _import_review(job, order_id, ["Shopify create already attempted; human reconciliation required"],
+                                  db, shopify, dry_run, order)
+        shopify_order_id = shopify.create_imported_order(order, variants)
+    except OrderCreateRejectedError as error:
+        db.clear_rejected_order_create(order_id)
+        return _import_review(job, order_id, [str(error)], db, shopify, dry_run, order)
     except ReviewRequiredError as error:
-        return _import_review(job, order_id, [str(error)], db, shopify, dry_run)
+        return _import_review(job, order_id, [str(error)], db, shopify, dry_run, order)
 
-    db.link_order(order_id, shopify_order_id)
-    # Shopify webhooks carry numeric IDs; GraphQL returns global IDs. Both paths
-    # must produce the same source key, including after a partial enqueue crash.
-    numeric_order_id = shopify_order_id.rsplit("/", 1)[-1]
-    for sku in sorted(variants):
-        db.enqueue_job(
-            "reconcile_sku", f"shopify-order:{numeric_order_id}:{sku}",
-            {"sku": sku, "shopify_order_id": shopify_order_id}, f"sku:{sku}",
-        )
-    return {"status": "imported", "order_id": order_id, "shopify_order_id": shopify_order_id}
+    return _finish_import(job, order_id, shopify_order_id, db, shopify, dry_run, skus=variants)
 
 
 def handle_shopify_order(
@@ -160,11 +195,13 @@ def handle_shopify_order(
 
     if problems:
         review_key = f"shopify-order:{numeric_order_id}"
-        note = "\n".join(problems)
+        note = f"Shopify order {shopify_order_id}; attempts: {job.attempts}\n" + "\n".join(problems)
         if not dry_run:
-            shopify.mark_order_review(shopify_order_id, review_key, note)
+            mark_order(db, shopify, shopify_order_id, review_key, note)
             db.needs_review(job.id, review_key, note)
         return {"status": "needs_review", "shopify_order_id": shopify_order_id, "problems": problems, "skus": sorted(skus)}
+    if not dry_run:
+        resolve_order(db, shopify, shopify_order_id, f"shopify-order:{numeric_order_id}")
     return {"status": "dry_run" if dry_run else "enqueued", "shopify_order_id": shopify_order_id, "skus": sorted(skus)}
 
 
@@ -198,11 +235,17 @@ def handle_reconcile_sku(
         changed = listing.available_quantity != target_quantity
         if changed and not dry_run:
             meli.set_available_quantity(listing, target_quantity)
+        if shopify_quantity < 0:
+            raise ReviewRequiredError(review_key,
+                                      f"Stock shortage: Shopify quantity {shopify_quantity}; Mercado Libre target 0 "
+                                      f"for item {listing.item_id}, variation {listing.variation_id}", {})
     except ReviewRequiredError as error:
         # Keep review failures outside the API catch boundary: a failed notice
         # must propagate, never be swallowed or attempted twice in this call.
         problem = str(error)
     else:
+        if not dry_run:
+            resolve_order(db, shopify, shopify_order_id, review_key)
         return {
             "status": "dry_run" if dry_run else ("updated" if changed else "unchanged"),
             "sku": sku,
@@ -213,7 +256,7 @@ def handle_reconcile_sku(
         }
 
     if not dry_run:
-        note = f"SKU {sku!r}: {problem}"
-        shopify.mark_order_review(shopify_order_id, review_key, note)
+        note = f"Shopify order {shopify_order_id}; SKU {sku!r}; attempts: {job.attempts}\n{problem}"
+        mark_order(db, shopify, shopify_order_id, review_key, note)
         db.needs_review(job.id, review_key, note)
     return {"status": "needs_review", "sku": sku, "shopify_order_id": shopify_order_id, "problems": [problem]}

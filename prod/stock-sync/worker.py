@@ -20,6 +20,7 @@ from stock_sync.db import Database
 from stock_sync.errors import RetryableSyncError, ReviewRequiredError
 from stock_sync.handlers import handle_import_meli_order, handle_reconcile_sku, handle_shopify_order
 from stock_sync.meli import MeliClient
+from stock_sync.reviews import mark_order, publish_draft
 from stock_sync.shopify import ShopifyClient
 
 
@@ -125,9 +126,9 @@ def _claim(db: Database, now: datetime, dry_run: bool):
     return db.get_job(candidate['id'])
 
 
-def _review_target(job):
+def _review_target(job, db):
     if job.job_type == 'import_meli_order' and job.payload.get('order_id') is not None:
-        return f"order:{job.payload['order_id']}", None
+        return f"order:{job.payload['order_id']}", db.get_order_link(str(job.payload['order_id']))
     if job.job_type == 'shopify_order' and job.payload.get('id') is not None:
         return f"shopify-order:{job.payload['id']}", f"gid://shopify/Order/{job.payload['id']}"
     if job.job_type == 'reconcile_sku' and job.payload.get('shopify_order_id'):
@@ -145,13 +146,12 @@ def _clear_review_checkpoint(db: Database, job_id: int) -> None:
 
 
 def _publish_review(db, shopify, job, notice, now):
-    key, order_id = _review_target(job)
+    key, order_id = _review_target(job, db)
     try:
         if order_id:
-            shopify.mark_order_review(order_id, key, notice)
+            mark_order(db, shopify, order_id, key, notice)
         else:
-            draft_id = shopify.create_or_update_review(key, notice)
-            db.link_review(key, draft_id)
+            publish_draft(db, shopify, key, notice)
     except (RetryableSyncError, ReviewRequiredError) as error:
         # Permanent Shopify permission failures also cannot lose the notice.
         db.retry_job(job.id, safe_text(f'{notice}; Review publication failed: {error}'), now, 7200)
@@ -164,7 +164,7 @@ def _publish_review(db, shopify, job, notice, now):
 
 
 def _require_review(db, shopify, job, error, now):
-    notice = safe_text(error)
+    notice = safe_text(f"{job.source_key}; attempts: {job.attempts}\n{error}")
     # Persist the notice before publishing: retries resume publication only.
     db.set_checkpoint(_review_checkpoint(job.id), notice)
     return _publish_review(db, shopify, job, notice, now)
