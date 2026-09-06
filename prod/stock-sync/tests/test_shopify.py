@@ -75,6 +75,7 @@ def variant_page(sku: str, variant_id: int, has_next: bool = False) -> dict[str,
                     "id": f"gid://shopify/ProductVariant/{variant_id}",
                     "sku": sku,
                     "inventoryQuantity": 7,
+                    "inventoryItem": {"tracked": True},
                 }
             ],
             "pageInfo": {"hasNextPage": has_next, "endCursor": f"cursor-{variant_id}" if has_next else None},
@@ -107,6 +108,7 @@ def variant(sku: str, variant_id: int = 11, available_quantity: int = 7) -> Shop
         variant_id=f"gid://shopify/ProductVariant/{variant_id}",
         sku=sku,
         available_quantity=available_quantity,
+        inventory_tracked=True,
     )
 
 
@@ -196,8 +198,8 @@ def test_get_available_quantity_requires_one_exact_variant(shopify, transport):
         {
             "productVariants": {
                 "nodes": [
-                    {"id": "gid://shopify/ProductVariant/11", "sku": "ABC", "inventoryQuantity": 7},
-                    {"id": "gid://shopify/ProductVariant/22", "sku": "ABC", "inventoryQuantity": 4},
+                    {"id": "gid://shopify/ProductVariant/11", "sku": "ABC", "inventoryQuantity": 7, "inventoryItem": {"tracked": True}},
+                    {"id": "gid://shopify/ProductVariant/22", "sku": "ABC", "inventoryQuantity": 4, "inventoryItem": {"tracked": True}},
                 ],
                 "pageInfo": {"hasNextPage": False, "endCursor": None},
             }
@@ -225,6 +227,56 @@ def test_get_available_quantity_requires_a_shopify_inventory_value(shopify, tran
 
     with pytest.raises(ReviewRequiredError, match="inventory quantity"):
         shopify.get_available_quantity("ABC")
+
+
+@pytest.mark.parametrize("tracked", [True, False])
+def test_variant_lookup_exposes_inventory_tracking(shopify, transport, tracked):
+    page = variant_page("ABC", 11)
+    page["productVariants"]["nodes"][0]["inventoryItem"] = {"tracked": tracked}
+    transport.pages = [page]
+
+    result = shopify.find_variants_by_skus(["ABC"])
+
+    assert result["ABC"][0].inventory_tracked is tracked
+    assert "inventoryItem { tracked }" in transport.last_query
+
+
+@pytest.mark.parametrize("inventory_item", [None, {}, {"tracked": "false"}])
+def test_variant_lookup_rejects_unknown_tracking(shopify, transport, inventory_item):
+    page = variant_page("ABC", 11)
+    page["productVariants"]["nodes"][0]["inventoryItem"] = inventory_item
+    transport.pages = [page]
+
+    with pytest.raises(ReviewRequiredError, match="tracking"):
+        shopify.find_variants_by_skus(["ABC"])
+
+
+def test_import_handler_creates_then_updates_one_tagged_review(db, shopify, transport):
+    from types import SimpleNamespace
+
+    from stock_sync.handlers import handle_import_meli_order
+
+    page = variant_page("ABC", 11)
+    page["productVariants"]["nodes"][0]["inventoryItem"]["tracked"] = False
+    transport.pages = [page, page]
+    meli = SimpleNamespace(get_order=lambda order_id: meli_order())
+    job_id = db.enqueue_job("import_meli_order", "meli-order:2001", {"order_id": "2001"}, "order:2001")
+    job = db.get_job(job_id)
+
+    handle_import_meli_order(job, db, shopify, meli)
+    transport.replies["find_review"] = {"draftOrders": {"nodes": [
+        {"id": "gid://shopify/DraftOrder/91", "tags": ["mercadolibre", "meli-needs-review", "meli-review-2001"]}
+    ]}}
+    handle_import_meli_order(job, db, shopify, meli)
+
+    mutations = [(operation, variables) for operation, variables in transport.calls
+                 if operation in {"create_review", "update_review", "create_imported_order"}]
+    assert [operation for operation, _ in mutations] == ["create_review", "update_review"]
+    assert mutations[0][1]["input"]["tags"] == ["mercadolibre", "meli-needs-review", "meli-review-2001"]
+    assert mutations[1][1]["id"] == "gid://shopify/DraftOrder/91"
+    assert db.count("review_links") == 1
+    assert db.count("order_links") == 0
+    assert db.get_job(job_id).status == "needs_review"
 
 
 def test_user_errors_raise_review_error(shopify, transport):

@@ -42,6 +42,7 @@ class ShopifyVariant:
     variant_id: str
     sku: str
     available_quantity: int
+    inventory_tracked: bool
 
 
 @dataclass(frozen=True)

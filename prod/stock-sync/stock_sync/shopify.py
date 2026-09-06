@@ -114,7 +114,7 @@ class ShopifyClient:
                     """
                     query FindVariants($query: String!, $after: String) {
                       productVariants(first: 100, query: $query, after: $after) {
-                        nodes { id sku inventoryQuantity }
+                        nodes { id sku inventoryQuantity inventoryItem { tracked } }
                         pageInfo { hasNextPage endCursor }
                       }
                     }
@@ -129,11 +129,19 @@ class ShopifyClient:
                                 f"Shopify SKU {sku!r} has no inventory quantity",
                                 {"operation": "find_variants", "fields": ["inventoryQuantity"]},
                             )
+                        inventory_item = node.get("inventoryItem")
+                        if not isinstance(inventory_item, dict) or type(inventory_item.get("tracked")) is not bool:
+                            raise ReviewRequiredError(
+                                f"sku:{sku}",
+                                f"Shopify SKU {sku!r} has unknown inventory tracking",
+                                {"operation": "find_variants", "fields": ["inventoryItem", "tracked"]},
+                            )
                         matches[sku].append(
                             ShopifyVariant(
                                 variant_id=str(node["id"]),
                                 sku=sku,
                                 available_quantity=int(node["inventoryQuantity"]),
+                                inventory_tracked=inventory_item["tracked"],
                             )
                         )
                 page_info = page.get("pageInfo") or {}
