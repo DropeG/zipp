@@ -133,6 +133,7 @@ def handle_import_meli_order(
 
 def handle_shopify_order(
     job: Job, db: Database, shopify: ShopifyClient,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     """Queue exact SKUs from an order whose inventory Shopify already handled."""
     numeric_order_id = str(job.payload["id"])
@@ -151,18 +152,20 @@ def handle_shopify_order(
                 skus.add(sku)
 
     for sku in sorted(skus):
-        db.enqueue_job(
-            "reconcile_sku", f"shopify-order:{numeric_order_id}:{sku}",
-            {"sku": sku, "shopify_order_id": shopify_order_id}, f"sku:{sku}",
-        )
+        if not dry_run:
+            db.enqueue_job(
+                "reconcile_sku", f"shopify-order:{numeric_order_id}:{sku}",
+                {"sku": sku, "shopify_order_id": shopify_order_id}, f"sku:{sku}",
+            )
 
     if problems:
         review_key = f"shopify-order:{numeric_order_id}"
         note = "\n".join(problems)
-        shopify.mark_order_review(shopify_order_id, review_key, note)
-        db.needs_review(job.id, review_key, note)
-        return {"status": "needs_review", "shopify_order_id": shopify_order_id, "problems": problems}
-    return {"status": "enqueued", "shopify_order_id": shopify_order_id, "skus": sorted(skus)}
+        if not dry_run:
+            shopify.mark_order_review(shopify_order_id, review_key, note)
+            db.needs_review(job.id, review_key, note)
+        return {"status": "needs_review", "shopify_order_id": shopify_order_id, "problems": problems, "skus": sorted(skus)}
+    return {"status": "dry_run" if dry_run else "enqueued", "shopify_order_id": shopify_order_id, "skus": sorted(skus)}
 
 
 def handle_reconcile_sku(
