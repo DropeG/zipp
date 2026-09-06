@@ -1,0 +1,201 @@
+const assert = require("node:assert/strict");
+const { createHmac } = require("node:crypto");
+const { mkdtemp, rm } = require("node:fs/promises");
+const { tmpdir } = require("node:os");
+const { join } = require("node:path");
+const test = require("node:test");
+const { DatabaseSync } = require("node:sqlite");
+
+const { createReceiver } = require("../receiver");
+
+const shopifySecret = "shopify-secret";
+const orderPayload = JSON.stringify({ id: "1001", line_items: [{ sku: "ABC" }] });
+
+function countRows(dbPath, table) {
+  const database = new DatabaseSync(dbPath);
+  const count = database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count;
+  database.close();
+  return count;
+}
+
+function jobFor(dbPath, jobType) {
+  const database = new DatabaseSync(dbPath);
+  const job = database.prepare(
+    "SELECT job_type, source_key, resource_key, payload FROM jobs WHERE job_type = ?"
+  ).get(jobType);
+  database.close();
+  return { ...job };
+}
+
+function signedShopifyHeaders(body, deliveryId = "delivery-1") {
+  return {
+    "x-shopify-hmac-sha256": createHmac("sha256", shopifySecret).update(body).digest("base64"),
+    "x-shopify-topic": "orders/create",
+    "x-shopify-shop-domain": "example.myshopify.com",
+    "x-shopify-webhook-id": deliveryId,
+  };
+}
+
+async function startReceiver() {
+  const directory = await mkdtemp(join(tmpdir(), "stock-sync-receiver-"));
+  const dbPath = join(directory, "stock-sync.sqlite");
+  const server = createReceiver({
+    databasePath: dbPath,
+    shopifyWebhookSecret: shopifySecret,
+    shopifyShopUrl: "https://example.myshopify.com",
+    meliWebhookToken: "secret",
+    maxWebhookBytes: 1024,
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+
+  return {
+    dbPath,
+    async close() {
+      await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      await rm(directory, { recursive: true, force: true });
+    },
+    get(path) {
+      return fetch(`http://127.0.0.1:${port}${path}`);
+    },
+    postRaw(path, body, headers) {
+      return fetch(`http://127.0.0.1:${port}${path}`, { method: "POST", headers, body });
+    },
+    postShopify(body, headers) {
+      return this.postRaw("/webhooks/shopify/orders-create", body, headers);
+    },
+    postSignedShopify(body, deliveryId) {
+      return this.postShopify(body, signedShopifyHeaders(body, deliveryId));
+    },
+  };
+}
+
+test("rejects an invalid Shopify HMAC without saving an event", async (t) => {
+  const receiver = await startReceiver();
+  t.after(() => receiver.close());
+
+  const response = await receiver.postShopify("{}", { "x-shopify-hmac-sha256": "bad" });
+
+  assert.equal(response.status, 401);
+  assert.equal(countRows(receiver.dbPath, "events"), 0);
+});
+
+test("deduplicates Shopify delivery IDs", async (t) => {
+  const receiver = await startReceiver();
+  t.after(() => receiver.close());
+
+  assert.equal((await receiver.postSignedShopify(orderPayload, "delivery-1")).status, 200);
+  assert.equal((await receiver.postSignedShopify(orderPayload, "delivery-1")).status, 200);
+
+  assert.equal(countRows(receiver.dbPath, "events"), 1);
+  assert.equal(countRows(receiver.dbPath, "jobs"), 1);
+  assert.deepEqual(jobFor(receiver.dbPath, "shopify_order"), {
+    job_type: "shopify_order",
+    source_key: "shopify-order:1001",
+    resource_key: "order:1001",
+    payload: orderPayload,
+  });
+});
+
+test("rejects oversized bodies before JSON parsing", async (t) => {
+  const receiver = await startReceiver();
+  t.after(() => receiver.close());
+
+  const response = await receiver.postRaw("/webhooks/meli", "x".repeat(1025), {
+    "x-webhook-token": "secret",
+  });
+
+  assert.equal(response.status, 413);
+  assert.equal(countRows(receiver.dbPath, "events"), 0);
+});
+
+test("rejects Shopify requests for a different topic, shop, or missing delivery ID", async (t) => {
+  const receiver = await startReceiver();
+  t.after(() => receiver.close());
+
+  const wrongTopic = await receiver.postShopify(orderPayload, {
+    ...signedShopifyHeaders(orderPayload),
+    "x-shopify-topic": "orders/updated",
+  });
+  const wrongShop = await receiver.postShopify(orderPayload, {
+    ...signedShopifyHeaders(orderPayload),
+    "x-shopify-shop-domain": "other.myshopify.com",
+  });
+  const noDeliveryId = await receiver.postShopify(orderPayload, {
+    ...signedShopifyHeaders(orderPayload),
+    "x-shopify-webhook-id": "",
+  });
+
+  assert.equal(wrongTopic.status, 400);
+  assert.equal(wrongShop.status, 400);
+  assert.equal(noDeliveryId.status, 400);
+  assert.equal(countRows(receiver.dbPath, "events"), 0);
+});
+
+test("rejects an authenticated Shopify body without an order ID", async (t) => {
+  const receiver = await startReceiver();
+  t.after(() => receiver.close());
+  const body = JSON.stringify({ line_items: [] });
+
+  const response = await receiver.postSignedShopify(body, "delivery-without-order");
+
+  assert.equal(response.status, 400);
+  assert.equal(countRows(receiver.dbPath, "events"), 0);
+});
+
+test("accepts a Mercado Libre order notice and queues the verified import", async (t) => {
+  const receiver = await startReceiver();
+  t.after(() => receiver.close());
+  const body = JSON.stringify({ resource: "/orders/2001", topic: "orders_v2" });
+
+  const response = await receiver.postRaw("/webhooks/meli", body, { "x-webhook-token": "secret" });
+
+  assert.equal(response.status, 200);
+  assert.equal(countRows(receiver.dbPath, "events"), 1);
+  assert.deepEqual(jobFor(receiver.dbPath, "import_meli_order"), {
+    job_type: "import_meli_order",
+    source_key: "meli-order:2001",
+    resource_key: "order:2001",
+    payload: JSON.stringify({ order_id: "2001" }),
+  });
+});
+
+test("rejects Mercado Libre notices with an invalid token or resource", async (t) => {
+  const receiver = await startReceiver();
+  t.after(() => receiver.close());
+
+  const badToken = await receiver.postRaw("/webhooks/meli", JSON.stringify({ resource: "/orders/2001" }), {
+    "x-webhook-token": "wrong",
+  });
+  const badResource = await receiver.postRaw("/webhooks/meli", JSON.stringify({ resource: "/questions/2001" }), {
+    "x-webhook-token": "secret",
+  });
+
+  assert.equal(badToken.status, 401);
+  assert.equal(badResource.status, 400);
+  assert.equal(countRows(receiver.dbPath, "events"), 0);
+});
+
+test("returns 503 and rolls back the event when SQLite cannot save its job", async (t) => {
+  const receiver = await startReceiver();
+  t.after(() => receiver.close());
+  const database = new DatabaseSync(receiver.dbPath);
+  database.exec("CREATE TRIGGER reject_jobs BEFORE INSERT ON jobs BEGIN SELECT RAISE(ABORT, 'job insert failed'); END;");
+  database.close();
+
+  const response = await receiver.postSignedShopify(orderPayload, "delivery-with-rejected-job");
+
+  assert.equal(response.status, 503);
+  assert.equal(countRows(receiver.dbPath, "events"), 0);
+  assert.equal(countRows(receiver.dbPath, "jobs"), 0);
+});
+
+test("reports health without requiring webhook authentication", async (t) => {
+  const receiver = await startReceiver();
+  t.after(() => receiver.close());
+
+  const response = await receiver.get("/health");
+
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), "ok");
+});
