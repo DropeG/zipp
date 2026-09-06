@@ -187,6 +187,8 @@ Each claim has an expiry time. If the worker crashes, the job becomes available 
 
 Temporary API and network errors are retried with increasing delays. Permanent problems and repeated failures go to human review.
 
+Human review happens in Shopify. The worker creates or updates a review draft when there is no real Shopify order to mark. The draft order rules are described below.
+
 Jobs always include their type and source. A Shopify job cannot be processed as a Mercado Libre import job.
 
 Only one order import for the same Mercado Libre order and one quantity update for the same SKU can run at a time.
@@ -201,6 +203,30 @@ Only one order import for the same Mercado Libre order and one quantity update f
 - More than one Mercado Libre listing for a SKU goes to human review.
 - Unsupported Mercado Libre variations go to human review.
 - Catalog loading must include every page; it must not stop silently after 1,000 listings.
+
+## Human Review in Shopify
+
+Shopify draft orders are the review inbox. The worker does not create an empty or fake paid order.
+
+If a Mercado Libre order cannot be imported before the real Shopify order exists, the worker creates one draft order containing:
+
+- one $0 custom item named `Mercado Libre order needs review`;
+- the `mercadolibre` and `meli-needs-review` tags;
+- a unique tag such as `meli-review-2000018107143682`;
+- the Mercado Libre order ID;
+- the SKU, quantity, and product title when available;
+- a simple explanation of the problem;
+- the number of attempts and the last error.
+
+The review draft does not reserve or reduce inventory, does not count as a paid sale, and does not send an email to the customer.
+
+Retries must update the existing review draft instead of creating another one. The worker checks SQLite and Shopify using the Mercado Libre order ID before creating a review draft.
+
+For a product problem that is not connected to one order, such as a missing or duplicate SKU found by the daily check, the worker creates one review draft for that SKU and problem type. Later checks update the same draft. When a later check confirms that the problem is gone, it replaces `meli-needs-review` with `meli-review-resolved`.
+
+To resolve an order problem, a person fixes the product or SKU in Shopify and retries the job. The worker then creates the correct paid order, removes `meli-needs-review` from the draft, adds `meli-review-resolved`, and adds the real Shopify order ID to the draft note. The draft remains as a simple history of what happened.
+
+If the problem happens after the real Shopify order already exists, the worker does not create a draft. It adds `meli-needs-review` and the error details to the real order. After resolution, it removes that tag and adds `meli-review-resolved`.
 
 ## Order Data in the First Version
 
@@ -243,7 +269,7 @@ The new version will use these main files:
 - `automations/stock-sync/scripts/shopify_webhook_catcher.js`: verifies and saves webhooks.
 - `automations/stock-sync/scripts/stock_sync_worker.py`: runs and routes jobs.
 - `automations/stock-sync/stock_sync/db.py`: manages the queue, claims, retries, order links, and logs.
-- `automations/stock-sync/stock_sync/shopify.py`: finds variants, creates imported orders, and reads inventory.
+- `automations/stock-sync/stock_sync/shopify.py`: finds variants, creates imported orders, reads inventory, and manages review drafts.
 - `automations/stock-sync/stock_sync/meli.py`: reads Mercado Libre orders and inventory.
 - `automations/stock-sync/stock_sync/handlers.py`: contains the rules for importing orders and updating quantities.
 
@@ -260,6 +286,12 @@ Tests must prove that:
 - retry after a crash finds the Shopify order that was already created;
 - unpaid Mercado Libre orders do not create Shopify orders;
 - one unsafe line prevents a partial Shopify order;
+- an unsafe Mercado Libre order creates one review draft with the correct tags and details;
+- retrying the same problem updates the existing draft instead of creating another draft;
+- a review draft never changes inventory or sends a customer email;
+- resolving the problem creates the correct real order and marks the review draft as resolved;
+- a problem found after the real order exists marks that order for review instead of creating a draft;
+- a daily product problem creates or updates one review draft for that SKU and problem type;
 - Shopify webhooks for imported orders do not reduce inventory again;
 - two Shopify orders for the same SKU are processed sequentially using fresh stock;
 - Shopify and Mercado Libre sales can arrive in either order;
@@ -306,4 +338,5 @@ If a problem occurs, stop the worker. Imported Shopify orders and confirmed stoc
 - Mercado Libre receives a fresh Shopify quantity.
 - Duplicate events, temporary failures, overlapping workers, and crashes do not silently lose or duplicate orders or stock changes.
 - Missing or unclear SKUs never create a partial order or change stock automatically.
+- Problems that need attention appear in Shopify as one review draft, or on the real order when it already exists.
 - The daily check imports missed Mercado Libre orders before checking all shared products.
