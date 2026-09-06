@@ -11,6 +11,7 @@ meli_tokens*.json
 .agents/
 .claude/
 .codex/
+.worktrees/
 
 # Python
 __pycache__/
