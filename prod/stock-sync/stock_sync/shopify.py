@@ -69,10 +69,25 @@ class GraphQLTransport:
                 f"Shopify {operation} returned an invalid response",
                 {"operation": operation, "fields": []},
             )
-        if payload.get("errors"):
+        errors = payload.get("errors")
+        if errors:
+            error_items = errors if isinstance(errors, list) else [errors]
+            messages = [
+                str(error.get("message", "Unknown Shopify GraphQL error"))
+                for error in error_items
+                if isinstance(error, dict)
+            ]
+            message = "; ".join(messages) or "Unknown Shopify GraphQL error"
+            codes = {
+                str(error.get("extensions", {}).get("code"))
+                for error in error_items
+                if isinstance(error, dict) and isinstance(error.get("extensions"), dict)
+            }
+            if {"THROTTLED", "INTERNAL_SERVER_ERROR"} & codes:
+                raise RetryableSyncError(f"Shopify {operation}: {message}")
             raise ReviewRequiredError(
                 operation,
-                f"Shopify {operation} returned GraphQL errors",
+                f"Shopify {operation}: {message}",
                 {"operation": operation, "fields": []},
             )
         data = payload.get("data")
@@ -104,7 +119,7 @@ class ShopifyClient:
                       }
                     }
                     """,
-                    {"query": f"sku:{sku}", "after": after},
+                    {"query": self._sku_search_query(sku), "after": after},
                 )["productVariants"]
                 for node in page.get("nodes", []):
                     if node.get("sku") == sku:
@@ -235,16 +250,16 @@ class ShopifyClient:
         data = self.transport.execute(
             "update_review",
             """
-            mutation UpdateReview($input: DraftOrderInput!) {
-              draftOrderUpdate(input: $input) {
+            mutation UpdateReview($id: ID!, $input: DraftOrderInput!) {
+              draftOrderUpdate(id: $id, input: $input) {
                 draftOrder { id }
                 userErrors { field message }
               }
             }
             """,
             {
+                "id": draft_id,
                 "input": {
-                    "id": draft_id,
                     "note": note,
                     "tags": self._merged_tags(old_tags, tags),
                 }
@@ -264,14 +279,14 @@ class ShopifyClient:
         data = self.transport.execute(
             "resolve_review",
             """
-            mutation ResolveReview($input: DraftOrderInput!) {
-              draftOrderUpdate(input: $input) {
+            mutation ResolveReview($id: ID!, $input: DraftOrderInput!) {
+              draftOrderUpdate(id: $id, input: $input) {
                 draftOrder { id }
                 userErrors { field message }
               }
             }
             """,
-            {"input": {"id": draft_id, "tags": tags}},
+            {"id": draft_id, "input": {"tags": tags}},
         )
         self._mutation_result("resolve_review", data, "draftOrderUpdate", review_key)
 
@@ -333,6 +348,13 @@ class ShopifyClient:
     @staticmethod
     def _review_tag(review_key: str) -> str:
         return f"meli-review-{review_key.split(':', 1)[-1]}"
+
+    @staticmethod
+    def _sku_search_query(sku: str) -> str:
+        escaped = sku.replace("\\", "\\\\")
+        for character in (" ", ":", "(", ")", '"'):
+            escaped = escaped.replace(character, f"\\{character}")
+        return f'sku:"{escaped}"'
 
     @staticmethod
     def _review_tags(stable_tag: str) -> list[str]:

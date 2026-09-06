@@ -16,6 +16,7 @@ class FakeTransport:
     pages: list[dict[str, Any]]
     replies: dict[str, dict[str, Any]]
     last_operation: str | None = None
+    last_query: str | None = None
     last_variables: dict[str, Any] | None = None
     calls: list[tuple[str, dict[str, Any]]] | None = None
 
@@ -23,11 +24,13 @@ class FakeTransport:
         self.pages = []
         self.replies = {}
         self.last_operation = None
+        self.last_query = None
         self.last_variables = None
         self.calls = []
 
     def execute(self, operation: str, query: str, variables: dict[str, Any]) -> dict[str, Any]:
         self.last_operation = operation
+        self.last_query = query
         self.last_variables = variables
         self.calls.append((operation, variables))
         if operation == "find_variants":
@@ -176,6 +179,14 @@ def test_duplicate_sku_returns_both_variants(shopify, transport):
     }
 
 
+def test_variant_lookup_quotes_and_escapes_special_character_skus(shopify, transport):
+    sku = 'A B:C(D)"E\\F'
+    transport.pages = [variant_page(sku, 11)]
+
+    assert shopify.find_variants_by_skus({sku}) == {sku: [variant(sku, 11)]}
+    assert transport.last_variables == {"query": 'sku:"A\\ B\\:C\\(D\\)\\"E\\\\F"', "after": None}
+
+
 def test_get_available_quantity_requires_one_exact_variant(shopify, transport):
     transport.pages = [variant_page("ABC", 11)]
 
@@ -256,10 +267,12 @@ def test_existing_review_draft_is_updated_not_recreated(shopify, transport):
     assert shopify.create_or_update_review("order:2001", "Updated note") == "gid://shopify/DraftOrder/91"
     assert [operation for operation, _ in transport.calls] == ["find_review", "update_review"]
     assert transport.last_variables["input"] == {
-        "id": "gid://shopify/DraftOrder/91",
         "note": "Updated note",
         "tags": ["mercadolibre", "meli-needs-review", "meli-review-2001"],
     }
+    assert transport.last_variables["id"] == "gid://shopify/DraftOrder/91"
+    assert "$id: ID!" in transport.last_query
+    assert "draftOrderUpdate(id: $id, input: $input)" in transport.last_query
 
 
 def test_resolve_review_replaces_needs_review_tag(shopify, transport):
@@ -277,6 +290,10 @@ def test_resolve_review_replaces_needs_review_tag(shopify, transport):
     shopify.resolve_review("order:2001")
 
     assert transport.last_operation == "resolve_review"
+    assert transport.last_variables["id"] == "gid://shopify/DraftOrder/91"
+    assert "id" not in transport.last_variables["input"]
+    assert "$id: ID!" in transport.last_query
+    assert "draftOrderUpdate(id: $id, input: $input)" in transport.last_query
     assert transport.last_variables["input"]["tags"] == [
         "mercadolibre",
         "meli-review-2001",
@@ -345,6 +362,82 @@ def test_transport_classifies_retryable_and_reviewable_http_failures(monkeypatch
 
     with pytest.raises(RetryableSyncError, match="offline"):
         GraphQLTransport(settings, session=FailingSession()).execute("test", "query", {})
+
+
+@pytest.mark.parametrize("code", ["THROTTLED", "INTERNAL_SERVER_ERROR"])
+def test_transport_retries_transient_top_level_graphql_errors(code):
+    from stock_sync.shopify import GraphQLTransport
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json() -> dict[str, Any]:
+            return {
+                "errors": [
+                    {"message": "Shopify is temporarily busy", "extensions": {"code": code}}
+                ]
+            }
+
+    class Session:
+        @staticmethod
+        def post(*args, **kwargs) -> Response:
+            return Response()
+
+    settings = Settings(
+        shopify_shop_url="https://example.myshopify.com",
+        shopify_access_token="token",
+        shopify_webhook_secret="secret",
+        meli_app_id="meli-app-id",
+        meli_client_secret="meli-secret",
+        meli_expected_seller_id="100",
+        meli_webhook_token="meli-webhook-token",
+        shopify_api_version="2026-07",
+        max_webhook_bytes=1024,
+        database_path="stock_sync.db",
+    )
+
+    with pytest.raises(RetryableSyncError, match="temporarily busy"):
+        GraphQLTransport(settings, session=Session()).execute("test", "query", {})
+
+
+def test_transport_preserves_permanent_top_level_graphql_error_message():
+    from stock_sync.shopify import GraphQLTransport
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json() -> dict[str, Any]:
+            return {
+                "errors": [
+                    {
+                        "message": "Access denied for write_orders",
+                        "extensions": {"code": "ACCESS_DENIED"},
+                    }
+                ]
+            }
+
+    class Session:
+        @staticmethod
+        def post(*args, **kwargs) -> Response:
+            return Response()
+
+    settings = Settings(
+        shopify_shop_url="https://example.myshopify.com",
+        shopify_access_token="token",
+        shopify_webhook_secret="secret",
+        meli_app_id="meli-app-id",
+        meli_client_secret="meli-secret",
+        meli_expected_seller_id="100",
+        meli_webhook_token="meli-webhook-token",
+        shopify_api_version="2026-07",
+        max_webhook_bytes=1024,
+        database_path="stock_sync.db",
+    )
+
+    with pytest.raises(ReviewRequiredError, match="Access denied for write_orders"):
+        GraphQLTransport(settings, session=Session()).execute("test", "query", {})
 
 
 def test_transport_posts_to_the_configured_2026_07_graphql_endpoint():
