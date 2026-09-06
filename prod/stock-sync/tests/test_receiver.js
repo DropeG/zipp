@@ -6,10 +6,21 @@ const { join } = require("node:path");
 const test = require("node:test");
 const { DatabaseSync } = require("node:sqlite");
 
-const { createReceiver } = require("../receiver");
+const { createReceiver, receiverListenOptionsFromEnvironment } = require("../receiver");
 
 const shopifySecret = "shopify-secret";
 const orderPayload = JSON.stringify({ id: "1001", line_items: [{ sku: "ABC" }] });
+
+test("receiver listener defaults to loopback and honors configured host", () => {
+  assert.deepEqual(receiverListenOptionsFromEnvironment({}), {
+    host: "127.0.0.1",
+    port: 3000,
+  });
+  assert.deepEqual(receiverListenOptionsFromEnvironment({ HOST: "127.0.0.2", PORT: "3010" }), {
+    host: "127.0.0.2",
+    port: 3010,
+  });
+});
 
 function countRows(dbPath, table) {
   const database = new DatabaseSync(dbPath);

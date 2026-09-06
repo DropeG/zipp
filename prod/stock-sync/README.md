@@ -32,18 +32,25 @@ No suba ese archivo ni la base de datos. `prod/stock-sync/data/.gitkeep` mantien
 | `MELI_APP_ID` | Si | Client ID de la aplicacion de Mercado Libre. |
 | `MELI_CLIENT_SECRET` | Si | Client secret de la aplicacion de Mercado Libre. |
 | `MELI_EXPECTED_SELLER_ID` | Si | ID exacto del vendedor autorizado. El worker rechaza ordenes, listings y tokens de otro vendedor. |
-| `MELI_WEBHOOK_TOKEN` | Si | Valor compartido que el receiver compara con el encabezado `x-webhook-token` de Mercado Libre. |
+| `MELI_WEBHOOK_TOKEN` | Si | Secreto que Nginx inyecta como `X-Webhook-Token` solo despues de aceptar una IP de notificacion de Mercado Libre. Mercado Libre no envia este encabezado. |
 | `MELI_TOKENS_FILE` | No; tiene ruta por defecto | Ruta al archivo de tokens de Mercado Libre. Por defecto: `prod/stock-sync/data/meli_tokens.json`. |
 | `STOCK_SYNC_DATABASE` | No; tiene ruta por defecto | Ruta SQLite. Por defecto: `prod/stock-sync/data/stock_sync.db`. |
 | `SHOPIFY_API_VERSION` | No; tiene valor por defecto | Version Admin GraphQL. Por defecto: `2026-07`. |
 | `MAX_WEBHOOK_BYTES` | No; tiene valor por defecto | Tamano maximo aceptado por webhook. Por defecto: `1048576`. |
+| `HOST` | No; tiene valor por defecto | Direccion de escucha del receiver. Por defecto: `127.0.0.1`; no use una direccion publica para este despliegue. |
 | `PORT` | No; tiene valor por defecto | Puerto HTTP del receiver. Por defecto: `3000`. |
 
 Tambien es obligatorio disponer de un archivo de tokens valido de Mercado Libre en `MELI_TOKENS_FILE`. Debe contener `access_token`, `refresh_token` y `expires_at` (timestamp Unix). El servicio refresca el token y reemplaza ese archivo de forma atomica. La obtencion inicial del token OAuth no tiene un comando en este repositorio: hagala con la aplicacion autorizada para el mismo `MELI_EXPECTED_SELLER_ID` y guarde solo el resultado en ese archivo.
 
 La app de Shopify debe conceder exactamente estos scopes requeridos por el servicio: `read_products`, `read_inventory`, `read_orders`, `write_orders` y `write_draft_orders`. El acceso de Mercado Libre debe pertenecer al vendedor configurado y permitir leer el usuario, ordenes e items/listings, y actualizar la cantidad disponible de items. No hay un nombre de scope de Mercado Libre configurado en el codigo.
 
-Configure en Shopify el webhook `orders/create` hacia `POST /webhooks/shopify/orders-create`. Configure en Mercado Libre las notificaciones de ordenes hacia `POST /webhooks/meli` con el encabezado `x-webhook-token` igual a `MELI_WEBHOOK_TOKEN`. El endpoint `GET /health` responde `ok`.
+## Entrada De Webhooks
+
+El receiver no se expone directamente a Internet: inicia en `HOST=127.0.0.1` y Nginx es la unica entrada publica. Instale y complete [`nginx-meli.conf.example`](nginx-meli.conf.example). El bloque de Mercado Libre acepta `POST /webhooks/meli` solo desde la lista oficial de IPs, reemplaza cualquier encabezado entrante e inyecta `X-Webhook-Token` con el mismo secreto configurado en `MELI_WEBHOOK_TOKEN`. Mercado Libre no envia ese encabezado.
+
+La lista incluida se copio de la documentacion oficial de [notificaciones de Mercado Libre Chile](https://developers.mercadolibre.cl/es_ar/publica-productos/productos-recibe-notificaciones) el 2026-09-07. Las IPs pueden cambiar: el operador debe revisar esa pagina y actualizar el ejemplo desplegado antes de cada rollout. Configure la URL publica de callback de Mercado Libre hacia la ruta Nginx `POST /webhooks/meli`, no hacia `127.0.0.1`.
+
+Shopify puede usar su propia ruta proxied `POST /webhooks/shopify/orders-create`; no necesita el secreto interno de Mercado Libre y el receiver conserva la verificacion HMAC de Shopify. El endpoint local `GET /health` responde `ok`.
 
 ## Comandos
 
@@ -54,7 +61,7 @@ Primero cargue las variables de entorno indicadas arriba. Estos son los nombres 
 | Crear o actualizar el esquema local | `./venv/bin/python prod/stock-sync/worker.py migrate` | Solo SQLite; no llama APIs. |
 | Ejecutar pruebas Python | `./venv/bin/python -m pytest prod/stock-sync/tests -q` | Pruebas aisladas con clientes falsos y SQLite temporal. |
 | Ejecutar pruebas Node | `(cd prod/stock-sync && node --test tests/test_receiver.js)` | Receiver local y archivos temporales del sistema, eliminados por la prueba. |
-| Iniciar receiver | `node prod/stock-sync/receiver.js` | Escucha webhooks y encola trabajo. |
+| Iniciar receiver | `HOST=127.0.0.1 PORT=3000 node prod/stock-sync/receiver.js` | Escucha solo en loopback; Nginx le entrega los webhooks y el receiver los encola. |
 | Inspeccionar un solo trabajo siguiente | `./venv/bin/python prod/stock-sync/worker.py once --dry-run` | Lee las APIs para evaluar el siguiente trabajo, sin crear ordenes ni actualizar stock. |
 | Aplicar un solo trabajo siguiente | `./venv/bin/python prod/stock-sync/worker.py once` | Puede crear una orden Shopify o actualizar stock Mercado Libre. Requiere confirmacion explicita previa. |
 | Worker continuo | `./venv/bin/python prod/stock-sync/worker.py run` | Aplica cada trabajo disponible. No lo inicie antes de las verificaciones en vivo. |
@@ -67,7 +74,7 @@ Primero cargue las variables de entorno indicadas arriba. Estos son los nombres 
 
 ## Operacion Normal
 
-Inicie el receiver y el worker como procesos separados. El receiver debe permanecer accesible para los dos proveedores; el worker usa un bloqueo SQLite, por lo que solo puede procesar un trabajo o una revision diaria a la vez. Revise regularmente:
+Inicie el receiver y el worker como procesos separados. Nginx entrega los dos proveedores al receiver local; el worker usa un bloqueo SQLite, por lo que solo puede procesar un trabajo o una revision diaria a la vez. Revise regularmente:
 
 ```bash
 ./venv/bin/python prod/stock-sync/worker.py list-review
@@ -92,34 +99,104 @@ Solo despues de aprobacion explicita puede ejecutar la version aplicada:
 Detenga primero el receiver y el worker. Antes de cualquier migracion o ejecucion aplicada, haga un respaldo SQLite consistente fuera del repositorio:
 
 ```bash
+stock_db_path="${STOCK_SYNC_DATABASE:-prod/stock-sync/data/stock_sync.db}"
 backup_dir=/var/backups/zipp-stock-sync
 backup="$backup_dir/stock_sync.db.$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "$backup_dir"
-test -f "$STOCK_SYNC_DATABASE"
-./venv/bin/python -c 'import sqlite3, sys; source, destination = sys.argv[1:]; src = sqlite3.connect(source); dst = sqlite3.connect(destination); src.backup(dst); dst.close(); src.close()' "$STOCK_SYNC_DATABASE" "$backup"
+test -f "$stock_db_path"
+./venv/bin/python - "$stock_db_path" "$backup" <<'PY'
+import sqlite3
+import sys
+
+source, destination = sys.argv[1:]
+with sqlite3.connect(source) as src, sqlite3.connect(destination) as dst:
+    src.backup(dst)
+PY
 ```
 
-Conserve la ruta del respaldo y confirme que existe antes de continuar. Para volver atras la cola local, conserve la base actual como evidencia del incidente y reemplacela solo cuando todos los procesos del nuevo servicio esten detenidos:
+Conserve la ruta del respaldo y confirme que existe antes de continuar. Para volver atras la cola local, primero cree una copia SQLite consistente de la base actual como evidencia del incidente. Esto incluye el estado que este en WAL; no mueva solo el archivo principal ni elimine archivos WAL.
 
 ```bash
+stock_db_path="${STOCK_SYNC_DATABASE:-prod/stock-sync/data/stock_sync.db}"
 test -f "$backup"
-incident_db="${STOCK_SYNC_DATABASE}.incident-$(date -u +%Y%m%dT%H%M%SZ)"
-mv "$STOCK_SYNC_DATABASE" "$incident_db"
-rm -f "${STOCK_SYNC_DATABASE}-wal" "${STOCK_SYNC_DATABASE}-shm"
-cp "$backup" "$STOCK_SYNC_DATABASE"
+test -f "$stock_db_path"
+incident_snapshot="$backup_dir/stock_sync.db.incident-$(date -u +%Y%m%dT%H%M%SZ)"
+./venv/bin/python - "$stock_db_path" "$incident_snapshot" <<'PY'
+import sqlite3
+import sys
+
+source, destination = sys.argv[1:]
+with sqlite3.connect(source) as src, sqlite3.connect(destination) as dst:
+    src.backup(dst)
+PY
+test -f "$incident_snapshot"
+./venv/bin/python - "$backup" "$stock_db_path" <<'PY'
+import sqlite3
+import sys
+
+source, destination = sys.argv[1:]
+with sqlite3.connect(source) as src, sqlite3.connect(destination) as dst:
+    src.backup(dst)
+PY
 ```
 
-No elimine `$incident_db`. No reinicie el worker aplicado hasta revisar el incidente. Restaurar SQLite no deshace una orden Shopify ni una cantidad de Mercado Libre que ya cambio; esos efectos requieren una correccion separada y revisada en cada plataforma.
+No elimine `$incident_snapshot`. No reinicie el worker aplicado hasta revisar el incidente. Restaurar SQLite no deshace una orden Shopify ni una cantidad de Mercado Libre que ya cambio; esos efectos requieren una correccion separada y revisada en cada plataforma.
 
 ## Control De Despliegue En Vivo (Pendiente)
 
 El siguiente despliegue de produccion **no** fue realizado por este cambio.
 
-1. Detenga los procesos del nuevo servicio, haga el respaldo SQLite y ejecute `migrate`.
-2. Con los procesadores anteriores aun activos, encole solo una orden pagada y conocida de Mercado Libre en la nueva cola y ejecute `once --dry-run`.
-3. Verifique manualmente los IDs de variante Shopify propuestos, cantidades, precios unitarios, moneda, tags `mercadolibre`/`meli-order-<id>` y el comportamiento de un decremento de inventario.
-4. Detengase y obtenga confirmacion explicita del usuario antes de cualquier importacion aplicada. No ejecute `once`, `daily` ni `run` en modo aplicado antes de esa confirmacion.
-5. Tras la confirmacion, detenga los dos procesadores anteriores, ejecute exactamente un `once` revisado y verifique una orden Shopify, un decremento de inventario y el enlace local de la orden.
-6. Ejecute una reconciliacion de SKU revisada, verifique ambas plataformas y los logs, y solo entonces habilite `run` y la tarea diaria aplicada.
+1. Detenga receiver y worker nuevos. Para esta primera prueba use una base nueva y aislada, no la base de los procesadores anteriores. Elija una orden pagada conocida con un solo SKU distinto y defina su ID:
+
+   ```bash
+   stock_db_path="$PWD/prod/stock-sync/data/first-rollout.db"
+   known_order_id=REEMPLACE_CON_LA_ORDEN_REVISADA
+   if test -e "$stock_db_path" || test -e "${stock_db_path}-wal" || test -e "${stock_db_path}-shm"; then
+     echo "La base de primera prueba no esta vacia; abortar."
+     exit 1
+   fi
+   export STOCK_SYNC_DATABASE="$stock_db_path"
+   ./venv/bin/python prod/stock-sync/worker.py migrate
+   ```
+
+2. En una terminal, inicie solo el receiver local. En otra terminal, envie exactamente un aviso de esa orden a loopback; este encabezado simula el que inyectara Nginx, no un encabezado de Mercado Libre:
+
+   ```bash
+   HOST=127.0.0.1 PORT=3000 node prod/stock-sync/receiver.js
+   ```
+
+   ```bash
+   curl --fail --show-error -X POST http://127.0.0.1:3000/webhooks/meli \
+     -H 'Content-Type: application/json' \
+     -H "X-Webhook-Token: $MELI_WEBHOOK_TOKEN" \
+     --data "{\"resource\":\"/orders/$known_order_id\",\"topic\":\"orders_v2\"}"
+   ```
+
+   Detenga el receiver con `Ctrl-C`. No inicie el worker aun.
+
+3. Verifique en modo de solo lectura que existe exactamente un trabajo pendiente y que corresponde a esa orden. Si el comando falla, aborte la prueba y no ejecute `once`:
+
+   ```bash
+   ./venv/bin/python - "$stock_db_path" "$known_order_id" <<'PY'
+   import sqlite3
+   import sys
+   from pathlib import Path
+
+   database_path, order_id = sys.argv[1:]
+   uri = f"{Path(database_path).resolve().as_uri()}?mode=ro"
+   with sqlite3.connect(uri, uri=True) as database:
+       rows = database.execute(
+           "SELECT job_type, source_key, status FROM jobs ORDER BY id"
+       ).fetchall()
+   expected = [("import_meli_order", f"meli-order:{order_id}", "pending")]
+   if rows != expected:
+       raise SystemExit(f"Expected one pending import job, found: {rows!r}")
+   print(rows[0])
+   PY
+   ```
+
+4. Con los procesadores anteriores aun activos, ejecute `./venv/bin/python prod/stock-sync/worker.py once --dry-run`. Verifique manualmente los IDs de variante Shopify propuestos, cantidades, precios unitarios, moneda, tags `mercadolibre`/`meli-order-<id>` y el comportamiento de un decremento de inventario. Repita el comando de solo lectura anterior: el trabajo debe haber vuelto a `pending`.
+5. Detengase y obtenga confirmacion explicita del usuario antes de `./venv/bin/python prod/stock-sync/worker.py once`. Ese unico comando puede crear la orden Shopify. Despues, el unico SKU de la orden deja exactamente un trabajo `reconcile_sku` pendiente; inspeccionelo con `once --dry-run` y obtenga confirmacion explicita antes de aplicarlo con el siguiente `once`.
+6. Solo despues de verificar una orden Shopify, un decremento de inventario, el enlace local, la reconciliacion de SKU, ambas plataformas y los logs, detenga los dos procesadores anteriores y habilite `run` y la tarea diaria aplicada.
 
 Si aparece un problema, detenga el worker y conserve la base de datos y los logs. No elimine ordenes importadas ni revierta automaticamente cambios de inventario confirmados.

@@ -1,0 +1,130 @@
+# Include this server block in the public TLS Nginx configuration. The Node
+# receiver remains private on 127.0.0.1:3000; do not publish that port.
+#
+# Replace STOCK_SYNC_PUBLIC_HOST and REPLACE_WITH_MELI_WEBHOOK_TOKEN before
+# deployment. The replacement token must exactly equal MELI_WEBHOOK_TOKEN in
+# prod/stock-sync/.env. Nginx overwrites any client-supplied header value.
+#
+# Mercado Libre Chile notification IP list, copied 2026-09-07 from:
+# https://developers.mercadolibre.cl/es_ar/publica-productos/productos-recibe-notificaciones
+# Mercado Libre can change this list. Recheck the official page and update the
+# deployed allowlist before every rollout.
+# This assumes Nginx receives the public connection directly. If a load balancer
+# or CDN is in front, configure Nginx real-IP handling only for that trusted
+# proxy before relying on these allow rules.
+
+server {
+    listen 443 ssl;
+    server_name STOCK_SYNC_PUBLIC_HOST;
+
+    # Configure the TLS certificate for STOCK_SYNC_PUBLIC_HOST here.
+
+    location = /webhooks/meli {
+        allow 44.212.211.213;
+        allow 52.1.149.176;
+        allow 52.44.99.39;
+        allow 52.2.210.204;
+        allow 52.6.145.31;
+        allow 54.205.100.116;
+        allow 184.73.213.131;
+        allow 52.6.10.186;
+        allow 52.73.233.211;
+        allow 3.223.169.202;
+        allow 34.206.9.12;
+        allow 34.238.55.98;
+        allow 3.227.34.138;
+        allow 3.229.206.80;
+        allow 34.238.221.21;
+        allow 13.223.211.78;
+        allow 44.215.49.123;
+        allow 54.159.49.50;
+        allow 13.223.10.233;
+        allow 13.223.33.60;
+        allow 3.93.112.28;
+        allow 13.223.124.243;
+        allow 3.233.174.68;
+        allow 50.16.251.125;
+        allow 50.16.65.64;
+        allow 54.81.195.49;
+        allow 54.82.205.180;
+        allow 3.94.30.241;
+        allow 54.242.75.139;
+        allow 98.82.195.215;
+        allow 34.196.28.113;
+        allow 44.208.170.246;
+        allow 52.23.122.60;
+        allow 13.223.232.16;
+        allow 13.223.236.125;
+        allow 44.193.180.190;
+        allow 13.223.107.11;
+        allow 3.219.157.78;
+        allow 3.230.160.247;
+        allow 13.223.154.1;
+        allow 44.214.161.82;
+        allow 54.196.88.69;
+        allow 100.24.130.185;
+        allow 3.230.190.19;
+        allow 35.172.55.95;
+        allow 23.22.202.234;
+        allow 3.95.35.84;
+        allow 54.146.232.68;
+        allow 13.223.135.7;
+        allow 52.71.11.70;
+        allow 54.173.9.186;
+        allow 100.29.255.54;
+        allow 34.203.95.8;
+        allow 52.7.171.45;
+        allow 3.225.202.17;
+        allow 34.204.236.214;
+        allow 52.200.170.172;
+        allow 34.197.223.209;
+        allow 50.17.138.96;
+        allow 54.84.11.70;
+        allow 3.88.83.19;
+        allow 52.86.119.98;
+        allow 54.88.119.105;
+        allow 13.223.210.67;
+        allow 54.160.66.146;
+        allow 54.236.191.153;
+        allow 13.223.210.140;
+        allow 44.212.229.114;
+        allow 52.204.14.181;
+        allow 34.192.190.219;
+        allow 44.207.104.38;
+        allow 52.200.84.58;
+        allow 35.221.4.79;
+        allow 34.86.252.100;
+        allow 34.145.201.132;
+        allow 34.21.78.254;
+        allow 34.86.6.77;
+        allow 35.245.10.147;
+        allow 35.236.212.3;
+        allow 136.107.43.234;
+        allow 34.48.38.213;
+        allow 35.221.39.135;
+        allow 34.48.138.13;
+        allow 35.221.12.66;
+        allow 54.88.218.97;
+        allow 18.215.140.160;
+        allow 18.213.114.129;
+        allow 18.206.34.84;
+        allow 35.236.253.169;
+        allow 35.245.91.34;
+        allow 35.245.20.104;
+        allow 35.186.182.146;
+        deny all;
+
+        proxy_set_header X-Webhook-Token "REPLACE_WITH_MELI_WEBHOOK_TOKEN";
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    # Shopify reaches this public route through Nginx as well. Nginx preserves
+    # Shopify's HMAC headers and the receiver verifies them before queuing work.
+    location = /webhooks/shopify/orders-create {
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_pass http://127.0.0.1:3000;
+    }
+}

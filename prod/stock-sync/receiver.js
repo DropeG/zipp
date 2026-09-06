@@ -196,11 +196,19 @@ function receiverFromEnvironment() {
   });
 }
 
+function receiverListenOptionsFromEnvironment(environment = process.env) {
+  return {
+    host: environment.HOST || "127.0.0.1",
+    port: Number(environment.PORT || "3000"),
+  };
+}
+
 if (require.main === module) {
   const server = receiverFromEnvironment();
-  server.listen(Number(process.env.PORT || "3000"), () => {
+  const { host, port } = receiverListenOptionsFromEnvironment();
+  server.listen(port, host, () => {
     process.stdout.write("stock-sync receiver listening\n");
   });
 }
 
-module.exports = { createReceiver, receiverFromEnvironment };
+module.exports = { createReceiver, receiverFromEnvironment, receiverListenOptionsFromEnvironment };
