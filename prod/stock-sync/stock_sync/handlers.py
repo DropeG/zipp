@@ -129,3 +129,88 @@ def handle_import_meli_order(
             {"sku": sku, "shopify_order_id": shopify_order_id}, f"sku:{sku}",
         )
     return {"status": "imported", "order_id": order_id, "shopify_order_id": shopify_order_id}
+
+
+def handle_shopify_order(
+    job: Job, db: Database, shopify: ShopifyClient,
+) -> dict[str, Any]:
+    """Queue exact SKUs from an order whose inventory Shopify already handled."""
+    numeric_order_id = str(job.payload["id"])
+    shopify_order_id = f"gid://shopify/Order/{numeric_order_id}"
+    lines = job.payload.get("line_items")
+    problems = []
+    skus = set()
+    if not isinstance(lines, list) or not lines:
+        problems.append("Order must contain line items with SKUs")
+    else:
+        for index, line in enumerate(lines, 1):
+            sku = line.get("sku") if isinstance(line, dict) else None
+            if not isinstance(sku, str) or not sku.strip():
+                problems.append(f"Line {index}: missing SKU")
+            else:
+                skus.add(sku)
+
+    for sku in sorted(skus):
+        db.enqueue_job(
+            "reconcile_sku", f"shopify-order:{numeric_order_id}:{sku}",
+            {"sku": sku, "shopify_order_id": shopify_order_id}, f"sku:{sku}",
+        )
+
+    if problems:
+        review_key = f"shopify-order:{numeric_order_id}"
+        note = "\n".join(problems)
+        shopify.mark_order_review(shopify_order_id, review_key, note)
+        db.needs_review(job.id, review_key, note)
+        return {"status": "needs_review", "shopify_order_id": shopify_order_id, "problems": problems}
+    return {"status": "enqueued", "shopify_order_id": shopify_order_id, "skus": sorted(skus)}
+
+
+def handle_reconcile_sku(
+    job: Job, db: Database, shopify: ShopifyClient, meli: MeliClient,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Copy fresh Shopify stock to one exact listing; never subtract inventory.
+
+    The worker serializes jobs. Catalog resolution precedes the Shopify read so
+    a slow listing scan cannot leave a cached Shopify quantity at write time.
+    """
+    sku = job.payload["sku"]
+    shopify_order_id = job.payload["shopify_order_id"]
+    review_key = f"sku:{sku}"
+    try:
+        if not isinstance(sku, str) or not sku.strip():
+            raise ReviewRequiredError(review_key, "Reconciliation requires a non-empty SKU", {})
+        matches = [listing for listing in meli.list_all_listings() if listing.sku == sku]
+        if len(matches) != 1:
+            raise ReviewRequiredError(
+                review_key,
+                f"Mercado Libre SKU {sku!r} must match exactly one item or variation, found {len(matches)}",
+                {"sku": sku},
+            )
+        listing = matches[0]
+        shopify_quantity = shopify.get_available_quantity(sku)
+        # Negative Shopify inventory represents overselling; Mercado Libre's
+        # sellable quantity is zero, matching its client's write contract.
+        target_quantity = max(0, shopify_quantity)
+        changed = listing.available_quantity != target_quantity
+        if changed and not dry_run:
+            meli.set_available_quantity(listing, target_quantity)
+    except ReviewRequiredError as error:
+        # Keep review failures outside the API catch boundary: a failed notice
+        # must propagate, never be swallowed or attempted twice in this call.
+        problem = str(error)
+    else:
+        return {
+            "status": "dry_run" if dry_run else ("updated" if changed else "unchanged"),
+            "sku": sku,
+            "shopify_order_id": shopify_order_id,
+            "shopify_quantity": shopify_quantity,
+            "meli_quantity": listing.available_quantity,
+            "target_quantity": target_quantity,
+        }
+
+    if not dry_run:
+        note = f"SKU {sku!r}: {problem}"
+        shopify.mark_order_review(shopify_order_id, review_key, note)
+        db.needs_review(job.id, review_key, note)
+    return {"status": "needs_review", "sku": sku, "shopify_order_id": shopify_order_id, "problems": [problem]}
