@@ -6,6 +6,13 @@
 !.env.example
 meli_tokens*.json
 
+# New stock-sync service runtime state. Keep its examples and schema tracked.
+/prod/stock-sync/.env
+/prod/stock-sync/data/*.db*
+/prod/stock-sync/data/meli_tokens.json
+# receiver tests use this prefix when TMPDIR is configured inside the service.
+/prod/stock-sync/stock-sync-receiver-*/
+
 # Local agent/editor configuration
 .agent/
 .agents/

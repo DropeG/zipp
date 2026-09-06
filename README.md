@@ -4,6 +4,10 @@ Repositorio general para automatizaciones operativas de Zipp.
 
 Este repo no representa una sola herramienta. Cada automatizacion vive en su propia carpeta bajo `automations/`, con sus scripts, pruebas y documentacion local. La primera automatizacion lista para traspaso es el sincronizador de stock Shopify <-> Mercado Libre.
 
+## Servicio De Produccion Nuevo
+
+El nuevo servicio autocontenido de sincronizacion de stock vive en [`prod/stock-sync/README.md`](prod/stock-sync/README.md). Ese manual es la referencia para instalarlo y para su despliegue controlado; los procesadores anteriores siguen sin cambios hasta que esas verificaciones terminen.
+
 ## Automatizaciones Activas
 
 | Automatizacion | Carpeta | Estado |
