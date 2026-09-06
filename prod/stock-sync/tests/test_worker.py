@@ -264,6 +264,33 @@ def test_dry_run_does_not_increment_attempt_even_during_inspection(ctx, monkeypa
     assert ctx.db.get_job(job_id).attempts == 4
 
 
+@pytest.mark.parametrize('selected_expired', [False, True])
+def test_dry_run_preserves_entire_unrelated_expired_job_row(ctx, selected_expired):
+    selected = enqueue(ctx, attempts=2)
+    unrelated = enqueue(ctx, 'shopify_order', attempts=3)
+    expired_at = (ctx.now - timedelta(minutes=1)).isoformat()
+    with ctx.db._connect() as connection:
+        connection.execute(
+            'UPDATE jobs SET status = ?, lease_until = ?, available_at = ? WHERE id = ?',
+            ('processing' if selected_expired else 'pending', expired_at if selected_expired else None,
+             (ctx.now - timedelta(hours=2)).isoformat(), selected),
+        )
+        connection.execute(
+            """UPDATE jobs SET status = 'processing', lease_until = ?, available_at = ?,
+               last_error = 'original unrelated failure', updated_at = ? WHERE id = ?""",
+            (expired_at, (ctx.now - timedelta(hours=1)).isoformat(), expired_at, unrelated),
+        )
+    before = row(ctx.db, unrelated)
+    result = run(ctx, dry_run=True)
+    assert result['job_id'] == selected
+    assert row(ctx.db, unrelated) == before
+    assert ctx.db.get_job(selected).status == 'pending'
+    assert ctx.db.get_job(selected).attempts == 2
+    assert row(ctx.db, selected)['lease_until'] is None
+    with ctx.db._connect() as connection:
+        assert connection.execute('SELECT COUNT(*) FROM sync_logs WHERE job_id = ?', (unrelated,)).fetchone()[0] == 0
+
+
 def test_dry_run_with_pending_review_notice_does_not_publish_or_restart_import(ctx):
     job_id = enqueue(ctx, attempts=4)
     ctx.meli.error = RetryableSyncError('original failure')
@@ -340,6 +367,66 @@ def test_daily_dry_run_leaves_checkpoint_and_business_data_unchanged(ctx):
     assert ctx.db.get_checkpoint('daily_orders_completed_at') is None
     assert ctx.shopify.orders == {}
     assert ctx.meli.writes == []
+
+
+@pytest.mark.parametrize('dry_run', [False, True])
+@pytest.mark.parametrize('paid_orders', [['2001'], []])
+def test_daily_blocks_pending_review_publication_before_import_or_catalog_work(ctx, dry_run, paid_orders, monkeypatch):
+    job_id = enqueue(ctx, attempts=4)
+    ctx.meli.error = RetryableSyncError('original failure')
+    ctx.shopify.review_error = RetryableSyncError('Shopify unavailable')
+    run(ctx)
+    before = row(ctx.db, job_id)
+    notice = ctx.db.get_checkpoint(f'worker_review:{job_id}')
+    assert before['status'] == 'retry_wait'
+    assert notice is not None
+
+    ctx.meli.error = None
+    ctx.shopify.review_error = None
+    ctx.meli.paid_orders = paid_orders
+    catalog_reads = []
+    original_catalog = ctx.shopify.list_all_variants
+
+    def read_catalog():
+        catalog_reads.append(True)
+        return original_catalog()
+
+    monkeypatch.setattr(ctx.shopify, 'list_all_variants', read_catalog)
+    result = worker.process_daily(ctx.db, ctx.shopify, ctx.meli, now=ctx.now, dry_run=dry_run)
+    assert result.status == 'needs_review'
+    assert result.review_keys == ['order:2001']
+    assert row(ctx.db, job_id) == before
+    assert ctx.db.get_checkpoint(f'worker_review:{job_id}') == notice
+    assert ctx.db.get_checkpoint('daily_orders_completed_at') is None
+    assert ctx.meli.reads == 1
+    assert ctx.shopify.orders == {}
+    assert ctx.meli.writes == []
+    assert catalog_reads == []
+
+
+def test_daily_keeps_published_import_review_blocking_until_explicit_retry(ctx):
+    job_id = enqueue(ctx, attempts=4)
+    ctx.meli.error = RetryableSyncError('original failure')
+    ctx.shopify.review_error = RetryableSyncError('Shopify unavailable')
+    run(ctx)
+    ctx.now += timedelta(hours=2)
+    ctx.meli.error = None
+    ctx.shopify.review_error = None
+    run(ctx)
+    assert ctx.db.get_job(job_id).status == 'needs_review'
+    assert ctx.db.get_checkpoint(f'worker_review:{job_id}') is None
+    ctx.meli.paid_orders = ['2001']
+    result = worker.process_daily(ctx.db, ctx.shopify, ctx.meli, now=ctx.now)
+    assert result.status == 'needs_review'
+    assert ctx.meli.reads == 1
+    assert ctx.shopify.orders == {}
+    assert ctx.db.get_job(job_id).status == 'needs_review'
+
+    assert worker.retry_review(ctx.db, job_id)
+    result = worker.process_daily(ctx.db, ctx.shopify, ctx.meli, now=ctx.now)
+    assert result.status == 'completed'
+    assert ctx.db.get_job(job_id).status == 'completed'
+    assert ctx.shopify.orders == {'2001': 'gid://shopify/Order/77'}
 
 
 def test_lock_is_released_after_daily_failure(ctx):

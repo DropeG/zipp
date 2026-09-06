@@ -49,6 +49,23 @@ def run_daily(
         raise ValueError("now must include a timezone")
     now = now.astimezone(timezone.utc)
     result = DailyResult(status="dry_run" if dry_run else "completed")
+    # Review publication belongs to the queued worker. Do not bypass its
+    # durable stop condition, even when an order falls outside today's search.
+    # Published import reviews also require an explicit retry before recovery.
+    with db._connect() as connection:
+        blocked = connection.execute(
+            """SELECT resource_key FROM jobs
+               WHERE job_type = 'import_meli_order'
+                 AND (status = 'needs_review' OR EXISTS (
+                     SELECT 1 FROM checkpoints
+                     WHERE checkpoint_key = 'worker_review:' || jobs.id))
+               ORDER BY id""",
+        ).fetchall()
+    if blocked:
+        result.status = "needs_review"
+        result.review_keys = [row["resource_key"] for row in blocked]
+        return result
+
     checkpoint = db.get_checkpoint("daily_orders_completed_at")
     since = datetime.fromisoformat(checkpoint) - timedelta(days=1) if checkpoint else now - timedelta(days=30)
 

@@ -92,27 +92,29 @@ def log_state(db: Database, job_id: int | None, state: str) -> None:
 
 def _claim(db: Database, now: datetime, dry_run: bool):
     now_text = db._timestamp(now)
-    with db._connect() as connection:
-        expired = connection.execute(
-            "SELECT id FROM jobs WHERE status = 'processing' AND lease_until <= ?", (now_text,),
-        ).fetchall()
-    for expired_job in expired:
-        db.retry_job(expired_job['id'], 'Processing lease expired', now, 0)
-        log_state(db, expired_job['id'], 'retry_wait (expired lease)')
     if not dry_run:
+        with db._connect() as connection:
+            expired = connection.execute(
+                "SELECT id FROM jobs WHERE status = 'processing' AND lease_until <= ?", (now_text,),
+            ).fetchall()
+        for expired_job in expired:
+            db.retry_job(expired_job['id'], 'Processing lease expired', now, 0)
+            log_state(db, expired_job['id'], 'retry_wait (expired lease)')
         return db.claim_next_job(now)
 
     # Inspecting must not spend a business attempt, even if the process dies.
+    # Only the selected row may change; other expired leases belong to apply.
     with db._connect() as connection:
         connection.execute('BEGIN IMMEDIATE')
         candidate = connection.execute(
             """SELECT * FROM jobs AS candidate
-               WHERE status IN ('pending', 'retry_wait') AND available_at <= ?
+               WHERE ((status IN ('pending', 'retry_wait') AND available_at <= ?)
+                      OR (status = 'processing' AND lease_until <= ?))
                  AND NOT EXISTS (
                      SELECT 1 FROM jobs AS locked
                      WHERE locked.resource_key = candidate.resource_key
                        AND locked.status = 'processing' AND locked.lease_until > ?)
-               ORDER BY available_at, id LIMIT 1""", (now_text, now_text),
+               ORDER BY available_at, id LIMIT 1""", (now_text, now_text, now_text),
         ).fetchone()
         if candidate is None:
             return None
