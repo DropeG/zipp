@@ -203,12 +203,22 @@ function receiverListenOptionsFromEnvironment(environment = process.env) {
   };
 }
 
-if (require.main === module) {
-  const server = receiverFromEnvironment();
-  const { host, port } = receiverListenOptionsFromEnvironment();
+function startReceiverFromEnvironment(environment = process.env, create = receiverFromEnvironment) {
+  const server = create();
+  const { host, port } = receiverListenOptionsFromEnvironment(environment);
   server.listen(port, host, () => {
     process.stdout.write("stock-sync receiver listening\n");
   });
+  return server;
 }
 
-module.exports = { createReceiver, receiverFromEnvironment, receiverListenOptionsFromEnvironment };
+if (require.main === module) {
+  startReceiverFromEnvironment();
+}
+
+module.exports = {
+  createReceiver,
+  receiverFromEnvironment,
+  receiverListenOptionsFromEnvironment,
+  startReceiverFromEnvironment,
+};

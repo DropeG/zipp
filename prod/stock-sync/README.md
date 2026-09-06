@@ -121,22 +121,27 @@ stock_db_path="${STOCK_SYNC_DATABASE:-prod/stock-sync/data/stock_sync.db}"
 test -f "$backup"
 test -f "$stock_db_path"
 incident_snapshot="$backup_dir/stock_sync.db.incident-$(date -u +%Y%m%dT%H%M%SZ)"
-./venv/bin/python - "$stock_db_path" "$incident_snapshot" <<'PY'
+if test -e "$incident_snapshot"; then
+  echo "La ruta del snapshot de incidente ya existe; abortar."
+  exit 1
+fi
+./venv/bin/python - "$stock_db_path" "$incident_snapshot" "$backup" <<'PY'
 import sqlite3
 import sys
+from pathlib import Path
 
-source, destination = sys.argv[1:]
-with sqlite3.connect(source) as src, sqlite3.connect(destination) as dst:
-    src.backup(dst)
-PY
-test -f "$incident_snapshot"
-./venv/bin/python - "$backup" "$stock_db_path" <<'PY'
-import sqlite3
-import sys
+current_database, incident_snapshot, previous_backup = sys.argv[1:]
 
-source, destination = sys.argv[1:]
-with sqlite3.connect(source) as src, sqlite3.connect(destination) as dst:
-    src.backup(dst)
+with sqlite3.connect(current_database) as source, sqlite3.connect(incident_snapshot) as destination:
+    source.backup(destination)
+
+snapshot_uri = f"{Path(incident_snapshot).resolve().as_uri()}?mode=ro"
+with sqlite3.connect(snapshot_uri, uri=True) as snapshot:
+    if snapshot.execute("PRAGMA integrity_check").fetchone() != ("ok",):
+        raise RuntimeError("Incident snapshot integrity check failed")
+
+with sqlite3.connect(previous_backup) as source, sqlite3.connect(current_database) as destination:
+    source.backup(destination)
 PY
 ```
 
@@ -196,7 +201,94 @@ El siguiente despliegue de produccion **no** fue realizado por este cambio.
    ```
 
 4. Con los procesadores anteriores aun activos, ejecute `./venv/bin/python prod/stock-sync/worker.py once --dry-run`. Verifique manualmente los IDs de variante Shopify propuestos, cantidades, precios unitarios, moneda, tags `mercadolibre`/`meli-order-<id>` y el comportamiento de un decremento de inventario. Repita el comando de solo lectura anterior: el trabajo debe haber vuelto a `pending`.
-5. Detengase y obtenga confirmacion explicita del usuario antes de `./venv/bin/python prod/stock-sync/worker.py once`. Ese unico comando puede crear la orden Shopify. Despues, el unico SKU de la orden deja exactamente un trabajo `reconcile_sku` pendiente; inspeccionelo con `once --dry-run` y obtenga confirmacion explicita antes de aplicarlo con el siguiente `once`.
-6. Solo despues de verificar una orden Shopify, un decremento de inventario, el enlace local, la reconciliacion de SKU, ambas plataformas y los logs, detenga los dos procesadores anteriores y habilite `run` y la tarea diaria aplicada.
+5. Detengase y obtenga confirmacion explicita del usuario antes de aplicar la importacion. Tras esa confirmacion, detenga los dos procesadores anteriores antes de ejecutar el primer comando aplicado:
+
+   ```bash
+   ./venv/bin/python prod/stock-sync/worker.py once
+   ```
+
+   El resultado incluye `shopify_order_id`. En Shopify, verifique manualmente que existe exactamente una orden con el tag `meli-order-$known_order_id`, que tiene los valores revisados y que el inventario se desconto una vez. Defina el ID recibido y confirme el enlace local en modo de solo lectura:
+
+   ```bash
+   shopify_order_id=REEMPLACE_CON_EL_ID_DEVUELTO
+   ./venv/bin/python - "$stock_db_path" "$known_order_id" "$shopify_order_id" <<'PY'
+   import sqlite3
+   import sys
+   from pathlib import Path
+
+   database_path, order_id, expected_shopify_order_id = sys.argv[1:]
+   uri = f"{Path(database_path).resolve().as_uri()}?mode=ro"
+   with sqlite3.connect(uri, uri=True) as database:
+       row = database.execute(
+           "SELECT shopify_order_id FROM order_links WHERE meli_order_id = ?",
+           (order_id,),
+       ).fetchone()
+   if row != (expected_shopify_order_id,):
+       raise SystemExit(f"Expected linked Shopify order {expected_shopify_order_id!r}, found: {row!r}")
+   print(row[0])
+   PY
+   ```
+
+6. Antes de procesar la reconciliacion, verifique que existe exactamente un trabajo elegible: `reconcile_sku`, `pending`, para el SKU revisado y para ese `shopify_order_id`. El comando tambien aborta si queda una importacion elegible. No ejecute `once` si falla:
+
+   ```bash
+   reviewed_sku=REEMPLACE_CON_EL_SKU_REVISADO
+   ./venv/bin/python - "$stock_db_path" "$reviewed_sku" "$shopify_order_id" <<'PY'
+   import json
+   import sqlite3
+   import sys
+   from datetime import datetime, timezone
+   from pathlib import Path
+
+   database_path, expected_sku, expected_shopify_order_id = sys.argv[1:]
+   uri = f"{Path(database_path).resolve().as_uri()}?mode=ro"
+   with sqlite3.connect(uri, uri=True) as database:
+       rows = database.execute(
+           "SELECT job_type, status, available_at, lease_until, payload, resource_key FROM jobs ORDER BY id"
+       ).fetchall()
+
+   now = datetime.now(timezone.utc)
+   def timestamp(value):
+       return datetime.fromisoformat(value).astimezone(timezone.utc)
+   active_resources = {
+       row[5] for row in rows
+       if row[1] == "processing" and row[3] is not None and timestamp(row[3]) > now
+   }
+   def eligible(row):
+       job_type, status, available_at, lease_until, payload, resource_key = row
+       if resource_key in active_resources:
+           return False
+       if status in {"pending", "retry_wait"}:
+           return timestamp(available_at) <= now
+       return status == "processing" and lease_until is not None and timestamp(lease_until) <= now
+
+   eligible_jobs = [row for row in rows if eligible(row)]
+   if any(row[0] == "import_meli_order" for row in eligible_jobs):
+       raise SystemExit(f"Eligible import job remains: {eligible_jobs!r}")
+   if len(eligible_jobs) != 1:
+       raise SystemExit(f"Expected exactly one eligible job, found: {eligible_jobs!r}")
+   job_type, status, available_at, lease_until, payload, resource_key = eligible_jobs[0]
+   if (job_type, status) != ("reconcile_sku", "pending"):
+       raise SystemExit(f"Expected pending reconcile_sku, found: {eligible_jobs[0]!r}")
+   payload = json.loads(payload)
+   if payload != {"sku": expected_sku, "shopify_order_id": expected_shopify_order_id}:
+       raise SystemExit(f"Unexpected reconciliation payload: {payload!r}")
+   print({"job_type": job_type, "status": status, "payload": payload})
+   PY
+   ```
+
+   Inspeccione ese unico trabajo sin cambios y verifique las cantidades propuestas:
+
+   ```bash
+   ./venv/bin/python prod/stock-sync/worker.py once --dry-run
+   ```
+
+   Obtenga confirmacion explicita antes de aplicar esa reconciliacion y solo entonces ejecute:
+
+   ```bash
+   ./venv/bin/python prod/stock-sync/worker.py once
+   ```
+
+7. Solo despues de verificar la reconciliacion de SKU, ambas plataformas y los logs, habilite `run` y la tarea diaria aplicada.
 
 Si aparece un problema, detenga el worker y conserve la base de datos y los logs. No elimine ordenes importadas ni revierta automaticamente cambios de inventario confirmados.
