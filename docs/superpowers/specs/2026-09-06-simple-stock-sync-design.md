@@ -262,16 +262,20 @@ For a quantity check, it shows the current Shopify and Mercado Libre quantities 
 
 Dry run is not a required production queue state. Production work validates and applies in one run so old values are not used later.
 
-## Files
+## Production Folder
 
-The new version will use these main files:
+The new production service is self-contained under `prod/stock-sync/`:
 
-- `automations/stock-sync/scripts/shopify_webhook_catcher.js`: verifies and saves webhooks.
-- `automations/stock-sync/scripts/stock_sync_worker.py`: runs and routes jobs.
-- `automations/stock-sync/stock_sync/db.py`: manages the queue, claims, retries, order links, and logs.
-- `automations/stock-sync/stock_sync/shopify.py`: finds variants, creates imported orders, reads inventory, and manages review drafts.
-- `automations/stock-sync/stock_sync/meli.py`: reads Mercado Libre orders and inventory.
-- `automations/stock-sync/stock_sync/handlers.py`: contains the rules for importing orders and updating quantities.
+- `prod/stock-sync/receiver.js`: verifies and saves webhooks.
+- `prod/stock-sync/worker.py`: runs and routes jobs.
+- `prod/stock-sync/stock_sync/db.py`: manages the queue, claims, retries, order links, and logs.
+- `prod/stock-sync/stock_sync/shopify.py`: finds variants, creates imported orders, reads inventory, and manages review drafts.
+- `prod/stock-sync/stock_sync/meli.py`: reads Mercado Libre orders and inventory.
+- `prod/stock-sync/stock_sync/handlers.py`: contains the rules for importing orders and updating quantities.
+- `prod/stock-sync/tests/`: contains the automated tests.
+- `prod/stock-sync/README.md`: contains the setup and run instructions.
+
+Everything required to run the service belongs in this folder. The production service must not depend on scripts scattered across other automation folders.
 
 The two old processors remain during testing. They are removed only after the new worker passes the tests and controlled live checks.
 
