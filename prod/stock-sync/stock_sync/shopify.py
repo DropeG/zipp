@@ -104,6 +104,53 @@ class ShopifyClient:
     def __init__(self, settings: Settings, transport: GraphQLExecutor | None = None) -> None:
         self.transport = transport or GraphQLTransport(settings)
 
+    def list_all_variants(self) -> list[ShopifyVariant]:
+        """Return the complete catalog, preserving exact, blank and duplicate SKUs."""
+        variants = []
+        after = None
+        seen_cursors = set()
+        while True:
+            data = self.transport.execute(
+                "list_all_variants",
+                """
+                query ListAllVariants($after: String) {
+                  productVariants(first: 100, after: $after) {
+                    nodes { id sku inventoryQuantity inventoryItem { tracked } }
+                    pageInfo { hasNextPage endCursor }
+                  }
+                }
+                """,
+                {"after": after},
+            )
+            try:
+                page = data["productVariants"]
+                nodes = page["nodes"]
+                page_info = page["pageInfo"]
+                if not isinstance(nodes, list) or type(page_info["hasNextPage"]) is not bool:
+                    raise ValueError("Invalid catalog page")
+                for node in nodes:
+                    tracked = node["inventoryItem"]["tracked"]
+                    quantity = node["inventoryQuantity"]
+                    if type(tracked) is not bool or type(quantity) is not int:
+                        raise ValueError("Unknown inventory tracking or quantity")
+                    sku = node["sku"]
+                    if sku is None:
+                        sku = ""
+                    if not isinstance(sku, str) or not isinstance(node["id"], str) or not node["id"]:
+                        raise ValueError("Invalid variant identity")
+                    variants.append(ShopifyVariant(node["id"], sku, quantity, tracked))
+                if not page_info["hasNextPage"]:
+                    return variants
+                after = page_info["endCursor"]
+                if not isinstance(after, str) or not after or after in seen_cursors or not nodes:
+                    raise ValueError("Incomplete catalog pagination")
+                seen_cursors.add(after)
+            except (KeyError, TypeError, ValueError) as error:
+                raise ReviewRequiredError(
+                    "shopify-catalog", f"Cannot safely load full Shopify catalog: {error}",
+                    {"operation": "list_all_variants"},
+                ) from error
+
     def find_variants_by_skus(self, skus: Iterable[str]) -> dict[str, list[ShopifyVariant]]:
         matches = {sku: [] for sku in skus}
         for sku in matches:

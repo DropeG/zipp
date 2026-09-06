@@ -83,6 +83,48 @@ def variant_page(sku: str, variant_id: int, has_next: bool = False) -> dict[str,
     }
 
 
+def test_full_catalog_paginates_without_losing_blank_or_duplicate_skus():
+    class CatalogTransport:
+        def __init__(self):
+            self.calls = []
+            self.pages = [variant_page("ABC", 1, True), variant_page("ABC", 2, True), variant_page("", 3)]
+
+        def execute(self, operation, query, variables):
+            self.calls.append((operation, variables))
+            return self.pages.pop(0)
+
+    transport = CatalogTransport()
+    result = ShopifyClient(None, transport=transport).list_all_variants()
+    assert [(v.variant_id, v.sku) for v in result] == [
+        ("gid://shopify/ProductVariant/1", "ABC"),
+        ("gid://shopify/ProductVariant/2", "ABC"),
+        ("gid://shopify/ProductVariant/3", ""),
+    ]
+    assert [variables for _, variables in transport.calls] == [
+        {"after": None}, {"after": "cursor-1"}, {"after": "cursor-2"},
+    ]
+
+
+@pytest.mark.parametrize("fault", ["missing_cursor", "repeated_cursor", "missing_page_info", "unknown_tracking", "missing_quantity"])
+def test_full_catalog_rejects_incomplete_or_unsafe_response(fault):
+    class CatalogTransport:
+        def execute(self, operation, query, variables):
+            page = variant_page("ABC", 1, True)
+            data = page["productVariants"]
+            if fault == "missing_cursor":
+                data["pageInfo"]["endCursor"] = None
+            elif fault == "missing_page_info":
+                del data["pageInfo"]
+            elif fault == "unknown_tracking":
+                data["nodes"][0]["inventoryItem"] = {}
+            elif fault == "missing_quantity":
+                data["nodes"][0]["inventoryQuantity"] = None
+            return page
+
+    with pytest.raises(ReviewRequiredError):
+        ShopifyClient(None, transport=CatalogTransport()).list_all_variants()
+
+
 def meli_order() -> MeliOrder:
     return MeliOrder(
         order_id="2001",
