@@ -1,161 +1,30 @@
 {
-  "7557373231239": "MLC4138912228",
-  "7837908959367": "MLC4139150144",
-  "7838260658311": "MLC2059405695",
-  "7840395231367": "MLC2068835795",
-  "7847762657415": {
-    "mode": "user_products_family",
-    "family_id": "4149154470492816",
-    "family_name": "Batería Externa 10000 Mah",
-    "variants": {
-      "41916408496263": {
-        "shopify_variant_id": "41916408496263",
-        "shopify_inventory_item_id": "44013457965191",
-        "sku": "POW-KUU-10-BLANCO-96",
-        "meli_item_id": "MLC2035141279",
-        "user_product_id": "MLCU4188455747"
-      }
-    },
-    "unpublished_variants": {
-      "41916415508615": {
-        "reason": "missing_sku",
-        "sku": null
-      }
-    },
-    "retired_meli_item_ids": []
-  },
-  "7892837892231": {
-    "mode": "user_products_family",
-    "family_id": "2209809397631698",
-    "family_name": "Batería Portátil Magsafe 10000 Mah",
-    "variants": {
-      "41916395946119": {
-        "shopify_variant_id": "41916395946119",
-        "shopify_inventory_item_id": "44013445415047",
-        "sku": "BAT-ZIP-10-SPACEGRAY-81",
-        "meli_item_id": "MLC2225575505",
-        "user_product_id": "MLCU5137474784"
-      },
-      "41916395978887": {
-        "shopify_variant_id": "41916395978887",
-        "shopify_inventory_item_id": "44013445447815",
-        "sku": "BAT-ZIP-10-DARKGREEN-9",
-        "meli_item_id": "MLC2225575491",
-        "user_product_id": "MLCU5103184597"
-      },
-      "41916396011655": {
-        "shopify_variant_id": "41916396011655",
-        "shopify_inventory_item_id": "44013445480583",
-        "sku": "BAT-ZIP-10-DARKPURPLE-88",
-        "meli_item_id": "MLC2225562903",
-        "user_product_id": "MLCU5103184645"
-      },
-      "42598321094791": {
-        "shopify_variant_id": "42598321094791",
-        "shopify_inventory_item_id": "44700322103431",
-        "sku": "BAT-ZIP-10-ROSEGOLD-95",
-        "meli_item_id": "MLC2225562905",
-        "user_product_id": "MLCU5137474020"
-      },
-      "42598326632583": {
-        "shopify_variant_id": "42598326632583",
-        "shopify_inventory_item_id": "44700327641223",
-        "sku": "BAT-ZIP-10-TITANIUM-2",
-        "meli_item_id": "MLC2225575493",
-        "user_product_id": "MLCU5103184713"
-      }
-    },
-    "unpublished_variants": {},
-    "retired_meli_item_ids": [
-      "MLC4211820028"
-    ]
-  },
-  "7848843903111": "MLC4210801582",
-  "7557359435911": "MLC4210801708",
-  "7894704226439": "MLC2073961373",
-  "7474281676935": "MLC4212347130",
-  "7474281578631": "MLC4212555302",
-  "7474317983879": "MLC2076421513",
-  "8065151631495": "MLC2074090763",
-  "7844720377991": "MLC4217915152",
-  "8180675248263": "MLC2079667731",
-  "7474281808007": "MLC2076811149",
-  "8044967559303": "MLC4218344976",
-  "7808895418503": "MLC2076890233",
-  "7839993757831": "MLC4218752556",
-  "7825265262727": "MLC4219657494",
-  "7809711177863": "MLC4219657812",
-  "7809768390791": "MLC4223500744",
-  "7809432715399": "MLC4223758926",
-  "7846625050759": "MLC2079759881",
-  "7838276911239": "MLC4225146244",
-  "7859085082759": "MLC4243842760",
-  "7799881662599": "MLC2089682953",
-  "7981827752071": "MLC2198168143",
-  "7474324635783": {
-    "mode": "user_products_family",
-    "family_id": "7641001013128271",
-    "family_name": "Cable iPhone USB A a Lightning - Kuulaa",
-    "variants": {
-      "41922900394119": {
-        "shopify_variant_id": "41922900394119",
-        "shopify_inventory_item_id": "44019962544263",
-        "sku": "CAB-KUU-1M-NEGRO-43",
-        "meli_item_id": "MLC2212126059",
-        "user_product_id": "MLCU5090455962"
-      },
-      "41922900557959": {
-        "shopify_variant_id": "41922900557959",
-        "shopify_inventory_item_id": "44019962708103",
-        "sku": "CAB-KUU-2M-CELESTE-36",
-        "meli_item_id": "MLC2212115149",
-        "user_product_id": "MLCU5090457348"
-      }
-    },
-    "unpublished_variants": {
-      "41922900459655": {
-        "reason": "no_stock",
-        "sku": null
-      },
-      "41922900525191": {
-        "reason": "no_stock",
-        "sku": "CAB-KUU-1M-CELESTE-15"
-      },
-      "41922900426887": {
-        "reason": "no_stock",
-        "sku": null
-      },
-      "41922900492423": {
-        "reason": "no_stock",
-        "sku": "CA0006-A-4"
-      }
-    },
-    "retired_meli_item_ids": [
-      "MLC4174086778"
-    ]
-  },
-  "8781566279815": {
-    "mode": "user_products_family",
-    "family_id": "785600762283411",
-    "family_name": "Cable Llavero 4 En 1",
-    "variants": {
-      "45741328924807": {
-        "shopify_variant_id": "45741328924807",
-        "shopify_inventory_item_id": "47874289893511",
-        "sku": "CAB-ZIP-6E-GRIS-75",
-        "meli_item_id": "MLC4441941922",
-        "user_product_id": "MLCU5059706367"
-      },
-      "45741328957575": {
-        "shopify_variant_id": "45741328957575",
-        "shopify_inventory_item_id": "47874289926279",
-        "sku": "CAB-ZIP-6E-NEGRO-17",
-        "meli_item_id": "MLC4441915968",
-        "user_product_id": "MLCU5092908484"
-      }
-    },
-    "unpublished_variants": {},
-    "retired_meli_item_ids": []
-  },
-  "8053822062727": "MLC4456895658"
+    "7557373231239": "MLC4138912228",
+    "7837908959367": "MLC4139150144",
+    "7838260658311": "MLC2059405695",
+    "7840395231367": "MLC2068835795",
+    "7847762657415": "MLC4208898574",
+    "7474282365063": "MLC2072644391",
+    "7892837892231": "MLC4211820028",
+    "7848843903111": "MLC4210801582",
+    "7557359435911": "MLC4210801708",
+    "7894704226439": "MLC2073961373",
+    "7474281676935": "MLC4212347130",
+    "7474281578631": "MLC4212555302",
+    "7474317983879": "MLC2076421513",
+    "8065151631495": "MLC2074090763",
+    "7844720377991": "MLC4217915152",
+    "8180675248263": "MLC2079667731",
+    "7474281808007": "MLC2076811149",
+    "8044967559303": "MLC4218344976",
+    "7808895418503": "MLC2076890233",
+    "7839993757831": "MLC4218752556",
+    "7825265262727": "MLC4219657494",
+    "7809711177863": "MLC4219657812",
+    "7809768390791": "MLC4223500744",
+    "7809432715399": "MLC4223758926",
+    "7846625050759": "MLC2079759881",
+    "7838276911239": "MLC4225146244",
+    "7859085082759": "MLC4243842760",
+    "7799881662599": "MLC2089682953"
 }

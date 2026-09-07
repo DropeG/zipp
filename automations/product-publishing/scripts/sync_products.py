@@ -104,7 +104,7 @@ def build_meli_payload(optimized_data, category_id, stock, price, pictures, extr
         },
         {
             "id": "MODEL",
-            "value_name": optimized_data.get("model") or "No aplica"
+            "value_name": optimized_data.get("model", "Accesorio")
         }
     ]
 
@@ -175,26 +175,11 @@ def build_meli_variations(variations, fallback_price):
         if seller_custom_field:
             meli_variation["seller_custom_field"] = str(seller_custom_field)
 
-        # Mercado Libre expects hosted picture IDs here, not Shopify URLs.
-        # Shopify source URLs remain in the top-level pictures collection until
-        # the API has ingested them.
-        picture_ids = variation.get("picture_ids") or []
+        picture_ids = variation.get("picture_ids") or variation.get("images") or []
         if picture_ids:
             meli_variation["picture_ids"] = picture_ids
 
-        attributes = list(variation.get("attributes") or [])
-        if seller_custom_field and not any(
-            attribute.get("id") == "SELLER_SKU" for attribute in attributes
-        ):
-            attributes.append({"id": "SELLER_SKU", "value_name": str(seller_custom_field)})
-        barcode = str(variation.get("barcode") or "").strip()
-        empty_barcodes = {"", "no aplica", "n/a", "na", "sin gtin", "sin codigo", "sin código"}
-        variation_attribute_ids = {attribute.get("id") for attribute in attributes}
-        if "GTIN" not in variation_attribute_ids and "EMPTY_GTIN_REASON" not in variation_attribute_ids:
-            if barcode.lower() not in empty_barcodes:
-                attributes.append({"id": "GTIN", "value_name": barcode})
-            else:
-                attributes.append({"id": "EMPTY_GTIN_REASON", "value_id": "17055160"})
+        attributes = variation.get("attributes") or []
         if attributes:
             meli_variation["attributes"] = attributes
 

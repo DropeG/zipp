@@ -61,30 +61,6 @@ def get_shopify_products(limit=50):
             
     return {"products": all_products}
 
-
-def get_product_metafield(product_id, namespace, key):
-    """Return one product metafield value, or None when it is not configured."""
-    if not SHOPIFY_SHOP_URL or not SHOPIFY_ACCESS_TOKEN:
-        raise ValueError(
-            "Faltan las credenciales de Shopify en las variables de entorno. "
-            "Asegúrate de definir SHOPIFY_SHOP_URL y SHOPIFY_ACCESS_TOKEN en tu archivo .env."
-        )
-
-    shop_domain = SHOPIFY_SHOP_URL.replace("https://", "").replace("http://", "").strip("/")
-    response = requests.get(
-        f"https://{shop_domain}/admin/api/{SHOPIFY_API_VERSION}/products/{product_id}/metafields.json",
-        headers={
-            "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
-        },
-        params={"namespace": namespace, "key": key},
-        timeout=60,
-    )
-    response.raise_for_status()
-    metafields = response.json().get("metafields", [])
-    return metafields[0].get("value") if metafields else None
-
 if __name__ == "__main__":
     try:
         products_data = get_shopify_products(limit=5)

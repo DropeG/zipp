@@ -15,11 +15,7 @@ meli_tokens*.json
 
 # Local agent/editor configuration
 .agent/
-.agents/*
-!.agents/skills/
-.agents/skills/*
-!.agents/skills/shopify-to-meli-one-by-one-sync/
-!.agents/skills/shopify-to-meli-one-by-one-sync/**
+.agents/
 .claude/
 .codex/
 .worktrees/
@@ -58,9 +54,4 @@ productos_pendientes.json
 respaldo_stock_productos_sin_bodega.json
 shopify_products_full.json
 sync_blocked_products.json
-publication_journal.json
-selection_reservations.json
-publication_quality_records.json
-.one_by_one.lock
-data/product-publishing/
 .tmp_shopify_images*/
