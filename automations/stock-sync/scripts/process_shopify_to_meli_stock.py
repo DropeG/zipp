@@ -23,6 +23,7 @@ from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
 DB_FILE = ROOT_DIR / "data" / "stock_sync.db"
+MAPPINGS_FILE = ROOT_DIR / "automations" / "product-publishing" / "sync_mappings.json"
 
 
 def load_env_file(path: Path) -> None:
@@ -348,6 +349,48 @@ def get_meli_entity_sku(entity: dict) -> str:
     return ""
 
 
+def load_product_mappings() -> dict:
+    """Load legacy scalar mappings and User Products family mappings."""
+    if not MAPPINGS_FILE.exists():
+        return {}
+    data = json.loads(MAPPINGS_FILE.read_text())
+    if not isinstance(data, dict):
+        raise RuntimeError("sync_mappings.json debe ser un objeto JSON.")
+    return data
+
+
+def find_local_mapping_matches_by_sku(sku: str, mappings: dict) -> list[dict]:
+    """Resolve a User Products variant locally before doing a seller-wide scan."""
+    expected = (sku or "").strip()
+    matches = []
+    for mapping in mappings.values():
+        if not isinstance(mapping, dict) or mapping.get("mode") != "user_products_family":
+            continue
+        for variant in (mapping.get("variants") or {}).values():
+            if not isinstance(variant, dict) or (variant.get("sku") or "").strip() != expected:
+                continue
+            item_id = variant.get("meli_item_id")
+            if item_id:
+                matches.append({"meli_item_id": str(item_id), "meli_variation_id": None, "match_level": "item"})
+    return matches
+
+
+def hydrate_local_mapping_matches(matches: list[dict]) -> list[dict]:
+    hydrated = []
+    for match in matches:
+        item = meli_get(
+            f"https://api.mercadolibre.com/items/{match['meli_item_id']}",
+            {"attributes": "id,title,status,available_quantity"},
+        )
+        hydrated.append({
+            **match,
+            "title": item.get("title"),
+            "status": item.get("status"),
+            "available_quantity": item.get("available_quantity"),
+        })
+    return hydrated
+
+
 def find_meli_matches_by_sku(sku: str, item_ids: list[str]) -> list[dict]:
     matches = []
     for item in fetch_meli_items(item_ids):
@@ -406,7 +449,7 @@ def load_ready_to_apply_tasks(conn: sqlite3.Connection, limit: int) -> list[sqli
     ).fetchall()
 
 
-def process_task(conn: sqlite3.Connection, task, location_id: int, meli_item_ids: list[str]) -> None:
+def process_task(conn: sqlite3.Connection, task, location_id: int, meli_item_ids: list[str], mappings: dict) -> None:
     task_id = task["task_id"]
     sku = task["sku"]
     variant_id = task["shopify_variant_id"]
@@ -422,7 +465,8 @@ def process_task(conn: sqlite3.Connection, task, location_id: int, meli_item_ids
 
     try:
         shopify_stock = get_shopify_stock_for_variant(str(variant_id), sku, location_id)
-        matches = find_meli_matches_by_sku(sku, meli_item_ids)
+        mapped_matches = find_local_mapping_matches_by_sku(sku, mappings)
+        matches = hydrate_local_mapping_matches(mapped_matches) if mapped_matches else find_meli_matches_by_sku(sku, meli_item_ids)
     except Exception as exc:
         note = str(exc)
         update_task(conn, task_id, "retryable_error", note, processed_at=now_iso())
@@ -637,10 +681,11 @@ def main() -> int:
 
     user_id = get_meli_user_id()
     item_ids = list_meli_item_ids(user_id)
+    mappings = load_product_mappings()
     print(f"Publicaciones Meli cargadas para busqueda SKU: {len(item_ids)}")
 
     for task in tasks:
-        process_task(conn, task, location_id, item_ids)
+        process_task(conn, task, location_id, item_ids, mappings)
         conn.commit()
 
     print("\nDry-run terminado.")
