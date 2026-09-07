@@ -1,0 +1,232 @@
+name: zipp-stock-sync
+
+x-worker-environment: &worker-environment
+  SHOPIFY_SHOP_URL: ${SHOPIFY_SHOP_URL:-}
+  SHOPIFY_ACCESS_TOKEN: ${SHOPIFY_ACCESS_TOKEN:-}
+  SHOPIFY_WEBHOOK_SECRET: ${SHOPIFY_WEBHOOK_SECRET:-}
+  SHOPIFY_API_VERSION: ${SHOPIFY_API_VERSION:-2026-07}
+  MELI_APP_ID: ${MELI_APP_ID:-}
+  MELI_CLIENT_SECRET: ${MELI_CLIENT_SECRET:-}
+  MELI_EXPECTED_SELLER_ID: ${MELI_EXPECTED_SELLER_ID:-}
+  MELI_WEBHOOK_TOKEN: ${MELI_WEBHOOK_TOKEN:-}
+  MELI_TOKENS_FILE: ${MELI_TOKENS_FILE:-/data/meli_tokens.json}
+  MELI_IMPORT_CUTOVER_AT: ${MELI_IMPORT_CUTOVER_AT:-}
+  STOCK_SYNC_DATABASE: ${STOCK_SYNC_DATABASE:-/data/stock_sync.db}
+
+services:
+  certbot:
+    profiles:
+      - tls
+    image: certbot/certbot:v5.8.0
+    command:
+      - certonly
+      - --standalone
+      - --non-interactive
+      - --agree-tos
+      - --register-unsafely-without-email
+      - --preferred-challenges
+      - http
+      - --domain
+      - ${STOCK_SYNC_PUBLIC_HOST:-}
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    ports:
+      - "80:80"
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./prod/stock-sync/certs:/etc/letsencrypt
+
+  data-init:
+    image: alpine:3.22
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        chown -R 10001:10001 /data
+        chown -R 10001:10001 /backups
+        chmod 700 /data
+        chmod 700 /backups
+        if [ -f /data/meli_tokens.json ]; then chmod 600 /data/meli_tokens.json; fi
+    network_mode: none
+    read_only: true
+    restart: "no"
+    volumes:
+      - ./prod/stock-sync/backups:/backups
+      - ./prod/stock-sync/data:/data
+
+  receiver:
+    build:
+      context: ./prod/stock-sync
+      target: receiver
+    image: zipp-stock-sync-receiver:local
+    depends_on:
+      data-init:
+        condition: service_completed_successfully
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3000
+      MAX_WEBHOOK_BYTES: ${MAX_WEBHOOK_BYTES:-1048576}
+      MELI_WEBHOOK_TOKEN: ${MELI_WEBHOOK_TOKEN:-}
+      SHOPIFY_SHOP_URL: ${SHOPIFY_SHOP_URL:-}
+      SHOPIFY_WEBHOOK_SECRET: ${SHOPIFY_WEBHOOK_SECRET:-}
+      STOCK_SYNC_DATABASE: ${STOCK_SYNC_DATABASE:-/data/stock_sync.db}
+    cap_drop:
+      - ALL
+    expose:
+      - "3000"
+    init: true
+    networks:
+      - receiver
+    read_only: true
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+    volumes:
+      - ./prod/stock-sync/data:/data
+
+  worker:
+    profiles:
+      - live
+    build:
+      context: ./prod/stock-sync
+      target: worker
+    image: zipp-stock-sync-worker:local
+    command:
+      - run
+    depends_on:
+      data-init:
+        condition: service_completed_successfully
+    environment: *worker-environment
+    cap_drop:
+      - ALL
+    init: true
+    networks:
+      - worker-egress
+    read_only: true
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    tmpfs:
+      - /tmp
+    volumes:
+      - ./prod/stock-sync/backups:/backups
+      - ./prod/stock-sync/data:/data
+
+  oauth:
+    profiles:
+      - oauth
+    build:
+      context: ./prod/stock-sync
+      target: worker
+    image: zipp-stock-sync-worker:local
+    entrypoint:
+      - python
+      - meli_oauth.py
+    command:
+      - serve
+    depends_on:
+      data-init:
+        condition: service_completed_successfully
+    environment:
+      MELI_APP_ID: ${MELI_APP_ID:-}
+      MELI_CLIENT_SECRET: ${MELI_CLIENT_SECRET:-}
+      MELI_EXPECTED_SELLER_ID: ${MELI_EXPECTED_SELLER_ID:-}
+      MELI_TOKENS_FILE: ${MELI_TOKENS_FILE:-/data/meli_tokens.json}
+      STOCK_SYNC_PUBLIC_HOST: ${STOCK_SYNC_PUBLIC_HOST:-}
+      MELI_OAUTH_HOST: 0.0.0.0
+      MELI_OAUTH_PORT: 3001
+    cap_drop:
+      - ALL
+    expose:
+      - "3001"
+    init: true
+    networks:
+      - receiver
+      - worker-egress
+    read_only: true
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+    volumes:
+      - ./prod/stock-sync/data:/data
+
+  nginx:
+    profiles:
+      - edge
+    image: nginx:1.30.4-alpine3.24
+    depends_on:
+      receiver:
+        condition: service_healthy
+    environment:
+      MELI_WEBHOOK_TOKEN: ${MELI_WEBHOOK_TOKEN:-}
+      STOCK_SYNC_PUBLIC_HOST: ${STOCK_SYNC_PUBLIC_HOST:-}
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - --quiet
+        - --spider
+        - http://receiver:3000/health
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+    networks:
+      - edge
+      - receiver
+    ports:
+      - "80:80"
+      - "443:443"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./prod/stock-sync/nginx-meli.conf.example:/etc/nginx/templates/default.conf.template:ro
+      - ./prod/stock-sync/certs:/etc/letsencrypt:ro
+
+  python-tests:
+    profiles:
+      - test
+    build:
+      context: ./prod/stock-sync
+      target: worker-tests
+    image: zipp-stock-sync-python-tests:local
+    cap_drop:
+      - ALL
+    network_mode: none
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+
+  node-tests:
+    profiles:
+      - test
+    build:
+      context: ./prod/stock-sync
+      target: receiver-tests
+    image: zipp-stock-sync-node-tests:local
+    cap_drop:
+      - ALL
+    network_mode: none
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+
+networks:
+  edge:
+  receiver:
+    internal: true
+  worker-egress:

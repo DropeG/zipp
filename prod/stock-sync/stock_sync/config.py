@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 
 @dataclass(frozen=True)
@@ -16,6 +17,7 @@ class Settings:
     shopify_api_version: str
     max_webhook_bytes: int
     database_path: str
+    meli_import_cutover_at: datetime | None = None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -33,6 +35,17 @@ class Settings:
         if missing:
             raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
 
+        cutover_text = os.environ.get("MELI_IMPORT_CUTOVER_AT", "").strip()
+        cutover_at = None
+        if cutover_text:
+            try:
+                cutover_at = datetime.fromisoformat(cutover_text.replace("Z", "+00:00"))
+            except ValueError as error:
+                raise ValueError("MELI_IMPORT_CUTOVER_AT must be an ISO-8601 timestamp") from error
+            if cutover_at.tzinfo is None or cutover_at.utcoffset() is None:
+                raise ValueError("MELI_IMPORT_CUTOVER_AT must include a timezone")
+            cutover_at = cutover_at.astimezone(timezone.utc)
+
         return cls(
             shopify_shop_url=values["SHOPIFY_SHOP_URL"],
             shopify_access_token=values["SHOPIFY_ACCESS_TOKEN"],
@@ -44,4 +57,5 @@ class Settings:
             shopify_api_version=os.environ.get("SHOPIFY_API_VERSION", "2026-07"),
             max_webhook_bytes=int(os.environ.get("MAX_WEBHOOK_BYTES", "1048576")),
             database_path=os.environ.get("STOCK_SYNC_DATABASE", "prod/stock-sync/data/stock_sync.db"),
+            meli_import_cutover_at=cutover_at,
         )

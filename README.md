@@ -9,3 +9,20 @@ Este repositorio contiene dos automatizaciones independientes para la tienda:
 
 Cada carpeta tiene su propio README, configuración de ejemplo, dependencias y
 pruebas. No subas secretos, tokens ni estado temporal de ejecución.
+
+## Entrada Rapida
+
+Para montar el sincronizador de stock en servidor:
+
+```bash
+git clone git@github.com:DropeG/zipp.git
+cd zipp
+cp prod/stock-sync/.env.example prod/stock-sync/.env
+docker compose build receiver worker python-tests node-tests
+```
+
+Despues sigue el manual especifico:
+
+```text
+prod/stock-sync/README.md
+```

@@ -10,6 +10,18 @@
 **/.pytest_cache/
 **/node_modules/
 
+# New stock-sync service runtime state. Keep its examples and schema tracked.
+/prod/stock-sync/.env
+/prod/stock-sync/data/*.db*
+/prod/stock-sync/data/meli_tokens.json
+/prod/stock-sync/data/meli_oauth_pending.json
+/prod/stock-sync/certs/**
+!/prod/stock-sync/certs/README.md
+/prod/stock-sync/backups/*
+!/prod/stock-sync/backups/README.md
+# receiver tests use this prefix when TMPDIR is configured inside the service.
+/prod/stock-sync/stock-sync-receiver-*/
+
 # Estado local de product-sync; el mapeo compartido sí se versiona.
 product-sync/state/work/
 product-sync/state/sync_blocked_products.json

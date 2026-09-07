@@ -160,6 +160,7 @@ class MeliClient:
         tokens_file: str | Path | None = None,
     ) -> None:
         self.seller_id = settings.meli_expected_seller_id
+        self.import_cutover_at = getattr(settings, "meli_import_cutover_at", None)
         self.transport = transport or MeliTransport(settings, tokens_file=tokens_file)
 
     def verify_seller(self) -> str:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -130,6 +131,17 @@ def handle_import_meli_order(
 
     if order.status != "paid":
         return {"status": "skipped", "order_id": order_id, "reason": f"Order status is {order.status}"}
+
+    cutover_at = getattr(meli, "import_cutover_at", None)
+    if cutover_at is not None:
+        processed_at = datetime.fromisoformat(order.processed_at).astimezone(timezone.utc)
+        if processed_at < cutover_at:
+            return {
+                "status": "ignored_before_cutover",
+                "order_id": order_id,
+                "processed_at": order.processed_at,
+                "cutover_at": cutover_at.isoformat(),
+            }
 
     variants, problems = _validate_import(order, shopify)
     if problems:

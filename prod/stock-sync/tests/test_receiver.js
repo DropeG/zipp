@@ -1,6 +1,6 @@
 const assert = require("node:assert/strict");
 const { createHmac } = require("node:crypto");
-const { mkdtemp, rm } = require("node:fs/promises");
+const { mkdtemp, readFile, rm } = require("node:fs/promises");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const test = require("node:test");
@@ -181,6 +181,14 @@ test("accepts a Mercado Libre order notice and queues the verified import", asyn
     resource_key: "order:2001",
     payload: JSON.stringify({ order_id: "2001" }),
   });
+});
+
+test("controlled rollout guide uses the deterministic Mercado Libre delivery key", async () => {
+  const guide = await readFile(join(__dirname, "..", "README.md"), "utf8");
+
+  assert.ok(guide.includes('_id: `first-rollout-${process.env.KNOWN_ORDER_ID}`'));
+  assert.match(guide, /f"meli-notice:\{order_id\}:first-rollout-\{order_id\}"/);
+  assert.match(guide, /f"order:\{order_id\}"/);
 });
 
 test("rejects Mercado Libre notices with an invalid token or resource", async (t) => {

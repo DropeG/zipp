@@ -1,0 +1,10 @@
+.env
+certs/
+backups/
+data/*
+!data/.gitkeep
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.db*
+*.log

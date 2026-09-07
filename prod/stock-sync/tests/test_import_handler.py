@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -124,6 +125,28 @@ def test_non_paid_order_has_no_mutations_even_with_invalid_lines(ctx, status):
     ctx.meli.order = replace(ctx.meli.order, status=status, lines=[])
     assert run(ctx)["status"] == "skipped"
     assert_no_business_mutations(ctx)
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_unlinked_paid_order_before_cutover_is_ignored_without_mutations(ctx, dry_run):
+    ctx.meli.import_cutover_at = datetime(2026, 9, 7, tzinfo=timezone.utc)
+
+    result = run(ctx, dry_run=dry_run)
+
+    assert result["status"] == "ignored_before_cutover"
+    assert result["order_id"] == "2001"
+    assert_no_business_mutations(ctx)
+
+
+def test_existing_link_before_cutover_still_repairs_reconciliation_jobs(ctx):
+    ctx.meli.import_cutover_at = datetime(2026, 9, 7, tzinfo=timezone.utc)
+    ctx.db.link_order("2001", "gid://shopify/Order/77")
+
+    result = run(ctx)
+
+    assert result["status"] == "imported"
+    assert result["shopify_order_id"] == "gid://shopify/Order/77"
+    assert len(reconcile_jobs(ctx.db)) == 1
 
 
 def test_collects_all_line_problems_before_creating_one_review(ctx):
