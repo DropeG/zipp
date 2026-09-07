@@ -1,57 +1,25 @@
 .DS_Store
 
-# Secrets and local credentials
-.env
-.env.*
-!.env.example
-meli_tokens*.json
+# Credenciales y tokens
+**/.env
+**/meli_tokens*.json
 
-# New stock-sync service runtime state. Keep its examples and schema tracked.
-/prod/stock-sync/.env
-/prod/stock-sync/data/*.db*
-/prod/stock-sync/data/meli_tokens.json
-# receiver tests use this prefix when TMPDIR is configured inside the service.
-/prod/stock-sync/stock-sync-receiver-*/
+# Python y Node
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/node_modules/
 
-# Local agent/editor configuration
-.agent/
-.agents/
-.claude/
-.codex/
-.worktrees/
+# Estado local de product-sync; el mapeo compartido sí se versiona.
+product-sync/state/work/
+product-sync/state/sync_blocked_products.json
+product-sync/state/publication_journal.json
+product-sync/state/selection_reservations.json
+product-sync/state/publication_quality_records.json
+product-sync/state/.one_by_one.lock
 
-# Python
-__pycache__/
-*.py[cod]
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-venv/
-venv.*/
-
-# Node
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# Runtime data and local state
-data/*.db
-data/*.db-*
-data/*.db.*
-data/*.sqlite
-data/shopify_webhooks/
-logs/
-*.log
-
-# Generated exports, audits, and temporary image workspaces
-Reporte Stock.xlsx
-reporte_stock_*.csv
-audit_shopify.json
-one_by_one_selection_audit.json
-productos_listos*.json
-productos_pendientes.json
-respaldo_stock_productos_sin_bodega.json
-shopify_products_full.json
-sync_blocked_products.json
-.tmp_shopify_images*/
+# Estado local de prod/stock-sync
+prod/stock-sync/data/*.db
+prod/stock-sync/data/*-wal
+prod/stock-sync/data/*-shm
+prod/stock-sync/data/meli_tokens.json
