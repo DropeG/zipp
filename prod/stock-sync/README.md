@@ -2,21 +2,22 @@
 
 Este servicio recibe webhooks, los guarda en SQLite y un solo worker los procesa. Una venta pagada de Mercado Libre puede crear una orden pagada y etiquetada en Shopify; una orden de Shopify o la tarea diaria puede actualizar la cantidad de Mercado Libre. El receiver solo encola trabajo: no llama a Shopify ni a Mercado Libre.
 
-Todos los comandos de este documento se ejecutan desde la raiz del repositorio. Las imagenes fijan Python 3.14.6 y Node.js 24.19.0; el host solo necesita Docker Engine y Docker Compose v2.
+Todos los comandos de este documento se ejecutan desde `prod/stock-sync`. Las imagenes fijan Python 3.14.6 y Node.js 24.19.0; el host solo necesita Docker Engine y Docker Compose v2.
 
 ## Instalacion Con Docker Compose
 
 ```bash
-cp prod/stock-sync/.env.example prod/stock-sync/.env
-chmod 600 prod/stock-sync/.env
+cd prod/stock-sync
+cp .env.example .env
+chmod 600 .env
 ```
 
-Complete `prod/stock-sync/.env`. Los tokens iniciales de Mercado Libre se obtienen con el flujo OAuth temporal documentado abajo; no se copian manualmente al archivo.
+Complete `.env`. Los tokens iniciales de Mercado Libre se obtienen con el flujo OAuth temporal documentado abajo; no se copian manualmente al archivo.
 
-Defina este helper en cada terminal operativa; `--env-file` carga la configuracion Compose sin imprimirla:
+Defina este helper en cada terminal operativa. Compose carga automáticamente el `.env` ubicado junto a `compose.yaml`:
 
 ```bash
-dc() { docker compose --env-file prod/stock-sync/.env "$@"; }
+dc() { docker compose "$@"; }
 ```
 
 Construya las imagenes y ejecute las pruebas aisladas antes de iniciar servicios:
@@ -79,7 +80,7 @@ El comando imprime una URL de Mercado Libre y guarda localmente un `state` y ver
 dc --profile edge --profile oauth up -d receiver oauth nginx
 ```
 
-Abra la URL impresa, inicie sesion como la cuenta vendedora principal y autorice la aplicacion. No use una cuenta de operador o colaborador. El callback comprueba el `state`, canjea el codigo y, si `MELI_EXPECTED_SELLER_ID` ya estaba configurado, rechaza otra cuenta. Si todo sale bien, el navegador muestra `Autorizacion completada` junto al ID numerico, los tokens quedan en `prod/stock-sync/data/meli_tokens.json` y el servicio `oauth` se apaga. Si el ID estaba vacio, copielo a `MELI_EXPECTED_SELLER_ID` antes de ejecutar cualquier comando del worker. Confirme el resultado sin mostrar secretos:
+Abra la URL impresa, inicie sesion como la cuenta vendedora principal y autorice la aplicacion. No use una cuenta de operador o colaborador. El callback comprueba el `state`, canjea el codigo y, si `MELI_EXPECTED_SELLER_ID` ya estaba configurado, rechaza otra cuenta. Si todo sale bien, el navegador muestra `Autorizacion completada` junto al ID numerico, los tokens quedan en `data/meli_tokens.json` y el servicio `oauth` se apaga. Si el ID estaba vacio, copielo a `MELI_EXPECTED_SELLER_ID` antes de ejecutar cualquier comando del worker. Confirme el resultado sin mostrar secretos:
 
 ```bash
 dc ps -a oauth
@@ -100,7 +101,7 @@ Este flujo no inicia el perfil `live` ni ejecuta cambios de stock. Durante la op
 
 ## Entrada De Webhooks
 
-El receiver no se expone directamente al host ni a Internet: solo pertenece a la red Docker interna `receiver`. Nginx es la unica entrada publica. Antes de activar el perfil `edge`, emita el certificado Let's Encrypt con el perfil `tls`; se guarda bajo `prod/stock-sync/certs/` y no se versiona. El bloque de Mercado Libre acepta `POST /webhooks/meli` solo desde la lista oficial de IPs, reemplaza cualquier encabezado entrante e inyecta `X-Webhook-Token` con el mismo secreto configurado en `MELI_WEBHOOK_TOKEN`. Mercado Libre no envia ese encabezado.
+El receiver no se expone directamente al host ni a Internet: solo pertenece a la red Docker interna `receiver`. Nginx es la unica entrada publica. Antes de activar el perfil `edge`, emita el certificado Let's Encrypt con el perfil `tls`; se guarda bajo `certs/` y no se versiona. El bloque de Mercado Libre acepta `POST /webhooks/meli` solo desde la lista oficial de IPs, reemplaza cualquier encabezado entrante e inyecta `X-Webhook-Token` con el mismo secreto configurado en `MELI_WEBHOOK_TOKEN`. Mercado Libre no envia ese encabezado.
 
 La lista incluida se copio de la documentacion oficial de [notificaciones de Mercado Libre Chile](https://developers.mercadolibre.cl/es_ar/publica-productos/productos-recibe-notificaciones) el 2026-09-07. Las IPs pueden cambiar: el operador debe revisar esa pagina y actualizar el ejemplo desplegado antes de cada rollout. Configure la URL publica de callback de Mercado Libre hacia la ruta Nginx `POST /webhooks/meli`, no hacia `127.0.0.1`.
 
@@ -222,7 +223,7 @@ El siguiente despliegue de produccion **no** fue realizado por este cambio.
 
    ```bash
    stock_db_path=/data/first-rollout.db
-   host_stock_db_path="$PWD/prod/stock-sync/data/first-rollout.db"
+   host_stock_db_path="$PWD/data/first-rollout.db"
    known_order_id=REEMPLACE_CON_LA_ORDEN_REVISADA
    if test -e "$host_stock_db_path" || test -e "${host_stock_db_path}-wal" || test -e "${host_stock_db_path}-shm"; then
      echo "La base de primera prueba no esta vacia; abortar."

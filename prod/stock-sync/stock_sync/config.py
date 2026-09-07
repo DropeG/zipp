@@ -56,6 +56,6 @@ class Settings:
             meli_webhook_token=values["MELI_WEBHOOK_TOKEN"],
             shopify_api_version=os.environ.get("SHOPIFY_API_VERSION", "2026-07"),
             max_webhook_bytes=int(os.environ.get("MAX_WEBHOOK_BYTES", "1048576")),
-            database_path=os.environ.get("STOCK_SYNC_DATABASE", "prod/stock-sync/data/stock_sync.db"),
+            database_path=os.environ.get("STOCK_SYNC_DATABASE", "data/stock_sync.db"),
             meli_import_cutover_at=cutover_at,
         )

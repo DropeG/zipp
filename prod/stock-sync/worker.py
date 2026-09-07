@@ -282,7 +282,7 @@ def main(argv=None) -> int:
     commands.add_parser('retry').add_argument('job_id', type=int)
     args = parser.parse_args(argv)
     try:
-        db = Database(os.environ.get('STOCK_SYNC_DATABASE', 'prod/stock-sync/data/stock_sync.db'))
+        db = Database(os.environ.get('STOCK_SYNC_DATABASE', 'data/stock_sync.db'))
         if args.command == 'migrate':
             print('Database migrated.')
         elif args.command == 'list-review':

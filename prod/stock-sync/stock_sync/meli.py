@@ -74,7 +74,7 @@ class MeliTransport:
     ) -> None:
         self.settings = settings
         self.tokens_file = Path(tokens_file if tokens_file is not None else os.environ.get(
-            "MELI_TOKENS_FILE", "prod/stock-sync/data/meli_tokens.json"
+            "MELI_TOKENS_FILE", "data/meli_tokens.json"
         ))
         self.session = session or requests.Session()
 

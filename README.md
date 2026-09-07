@@ -16,8 +16,9 @@ Para montar el sincronizador de stock en servidor:
 
 ```bash
 git clone git@github.com:DropeG/zipp.git
-cd zipp
-cp prod/stock-sync/.env.example prod/stock-sync/.env
+cd zipp/prod/stock-sync
+cp .env.example .env
+chmod 600 .env
 docker compose build receiver worker python-tests node-tests
 ```
 

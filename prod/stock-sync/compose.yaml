@@ -38,7 +38,7 @@ services:
     security_opt:
       - no-new-privileges:true
     volumes:
-      - ./prod/stock-sync/certs:/etc/letsencrypt
+      - ./certs:/etc/letsencrypt
 
   data-init:
     image: alpine:3.22
@@ -55,12 +55,12 @@ services:
     read_only: true
     restart: "no"
     volumes:
-      - ./prod/stock-sync/backups:/backups
-      - ./prod/stock-sync/data:/data
+      - ./backups:/backups
+      - ./data:/data
 
   receiver:
     build:
-      context: ./prod/stock-sync
+      context: .
       target: receiver
     image: zipp-stock-sync-receiver:local
     depends_on:
@@ -88,13 +88,13 @@ services:
     tmpfs:
       - /tmp
     volumes:
-      - ./prod/stock-sync/data:/data
+      - ./data:/data
 
   worker:
     profiles:
       - live
     build:
-      context: ./prod/stock-sync
+      context: .
       target: worker
     image: zipp-stock-sync-worker:local
     command:
@@ -116,14 +116,14 @@ services:
     tmpfs:
       - /tmp
     volumes:
-      - ./prod/stock-sync/backups:/backups
-      - ./prod/stock-sync/data:/data
+      - ./backups:/backups
+      - ./data:/data
 
   oauth:
     profiles:
       - oauth
     build:
-      context: ./prod/stock-sync
+      context: .
       target: worker
     image: zipp-stock-sync-worker:local
     entrypoint:
@@ -157,7 +157,7 @@ services:
     tmpfs:
       - /tmp
     volumes:
-      - ./prod/stock-sync/data:/data
+      - ./data:/data
 
   nginx:
     profiles:
@@ -190,14 +190,14 @@ services:
     security_opt:
       - no-new-privileges:true
     volumes:
-      - ./prod/stock-sync/nginx-meli.conf.example:/etc/nginx/templates/default.conf.template:ro
-      - ./prod/stock-sync/certs:/etc/letsencrypt:ro
+      - ./nginx-meli.conf.example:/etc/nginx/templates/default.conf.template:ro
+      - ./certs:/etc/letsencrypt:ro
 
   python-tests:
     profiles:
       - test
     build:
-      context: ./prod/stock-sync
+      context: .
       target: worker-tests
     image: zipp-stock-sync-python-tests:local
     cap_drop:
@@ -213,7 +213,7 @@ services:
     profiles:
       - test
     build:
-      context: ./prod/stock-sync
+      context: .
       target: receiver-tests
     image: zipp-stock-sync-node-tests:local
     cap_drop:

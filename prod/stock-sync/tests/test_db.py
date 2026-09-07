@@ -118,4 +118,4 @@ def test_settings_require_secrets_and_apply_defaults(monkeypatch):
 
     assert settings.shopify_api_version == "2026-07"
     assert settings.max_webhook_bytes == 1048576
-    assert settings.database_path == "prod/stock-sync/data/stock_sync.db"
+    assert settings.database_path == "data/stock_sync.db"
