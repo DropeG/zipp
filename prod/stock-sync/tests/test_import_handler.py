@@ -24,12 +24,17 @@ class FakeMeli:
         self.order = MeliOrder("2001", "100", "paid", "2026-09-06T12:00:00+00:00", [line()])
         self.error = None
         self.requested_ids = []
+        self.status_requested_ids = []
 
     def get_order(self, order_id):
         self.requested_ids.append(order_id)
         if self.error:
             raise self.error
         return self.order
+
+    def get_order_status(self, order_id):
+        self.status_requested_ids.append(order_id)
+        return self.order.status
 
 
 class FakeShopify:
@@ -44,6 +49,13 @@ class FakeShopify:
         self.review_error = None
         self.order_skus = ["ABC"]
         self.resolved = []
+        self.cancellation_state = {
+            "cancelled": False, "cancelled_at": None, "fulfillment_status": "UNFULFILLED",
+        }
+        self.cancel_calls = []
+        self.cancel_done = True
+        self.cancel_job_done = True
+        self.cancel_job_checks = []
 
     def find_variants_by_skus(self, skus):
         result = {}
@@ -71,11 +83,34 @@ class FakeShopify:
             raise self.review_error
         return "gid://shopify/DraftOrder/91"
 
+    def mark_order_review(self, order_id, review_key, note):
+        self.review_calls.append((review_key, note))
+
+    def resolve_order_review(self, order_id, review_key):
+        self.resolved.append((review_key, order_id))
+
     def resolve_review(self, review_key, *, draft_id=None, shopify_order_id=None):
         self.resolved.append((review_key, shopify_order_id))
 
     def get_order_skus(self, order_id):
         return self.order_skus
+
+    def get_order_cancellation_state(self, order_id):
+        return dict(self.cancellation_state)
+
+    def cancel_imported_order(self, order_id, meli_order_id):
+        self.cancel_calls.append((order_id, meli_order_id))
+        if self.cancel_done:
+            self.cancellation_state = {
+                "cancelled": True,
+                "cancelled_at": "2026-09-08T12:00:00Z",
+                "fulfillment_status": "UNFULFILLED",
+            }
+        return "gid://shopify/Job/cancel-77", self.cancel_done
+
+    def cancellation_job_done(self, job_id):
+        self.cancel_job_checks.append(job_id)
+        return self.cancel_job_done
 
 
 @pytest.fixture
@@ -147,6 +182,77 @@ def test_existing_link_before_cutover_still_repairs_reconciliation_jobs(ctx):
     assert result["status"] == "imported"
     assert result["shopify_order_id"] == "gid://shopify/Order/77"
     assert len(reconcile_jobs(ctx.db)) == 1
+
+
+def test_linked_cancelled_meli_order_cancels_shopify_and_queues_absolute_reconciliation(ctx):
+    ctx.db.link_order("2001", "gid://shopify/Order/77")
+    ctx.meli.order = replace(ctx.meli.order, status="cancelled", processed_at="", lines=[])
+
+    result = run(ctx)
+
+    assert result == {
+        "status": "cancelled",
+        "order_id": "2001",
+        "shopify_order_id": "gid://shopify/Order/77",
+        "skus": ["ABC"],
+    }
+    assert ctx.shopify.cancel_calls == [("gid://shopify/Order/77", "2001")]
+    assert [job.source_key for job in reconcile_jobs(ctx.db)] == ["shopify-cancelled:77:ABC"]
+    assert ctx.db.get_checkpoint("shopify_cancel_job:2001") is None
+
+
+def test_unlinked_cancelled_meli_order_does_not_create_or_cancel_shopify_order(ctx):
+    ctx.meli.order = replace(ctx.meli.order, status="cancelled", processed_at="", lines=[])
+
+    assert run(ctx)["status"] == "skipped"
+    assert ctx.shopify.cancel_calls == []
+    assert_no_business_mutations(ctx)
+
+
+def test_cancelled_meli_order_dry_run_only_reports_safe_action(ctx):
+    ctx.db.link_order("2001", "gid://shopify/Order/77")
+    ctx.meli.order = replace(ctx.meli.order, status="cancelled", processed_at="", lines=[])
+
+    result = run(ctx, dry_run=True)
+
+    assert result["status"] == "dry_run"
+    assert result["action"] == "cancel_without_refund_and_restock"
+    assert ctx.shopify.cancel_calls == []
+    assert reconcile_jobs(ctx.db) == []
+
+
+def test_fulfilled_shopify_order_requires_review_instead_of_forced_cancellation(ctx):
+    ctx.db.link_order("2001", "gid://shopify/Order/77")
+    ctx.meli.order = replace(ctx.meli.order, status="cancelled", processed_at="", lines=[])
+    ctx.shopify.cancellation_state["fulfillment_status"] = "FULFILLED"
+
+    result = run(ctx)
+
+    assert result["status"] == "needs_review"
+    assert "FULFILLED" in result["problems"][0]
+    assert ctx.shopify.cancel_calls == []
+    assert ctx.db.get_job(ctx.job.id).status == "needs_review"
+
+
+def test_async_shopify_cancellation_is_checkpointed_and_resumed_without_second_mutation(ctx):
+    ctx.db.link_order("2001", "gid://shopify/Order/77")
+    ctx.meli.order = replace(ctx.meli.order, status="cancelled", processed_at="", lines=[])
+    ctx.shopify.cancel_done = False
+
+    with pytest.raises(RetryableSyncError, match="still processing"):
+        run(ctx)
+
+    assert ctx.db.get_checkpoint("shopify_cancel_job:2001") == "gid://shopify/Job/cancel-77"
+    ctx.shopify.cancel_job_done = True
+    ctx.shopify.cancellation_state = {
+        "cancelled": True,
+        "cancelled_at": "2026-09-08T12:00:00Z",
+        "fulfillment_status": "UNFULFILLED",
+    }
+    assert run(ctx)["status"] == "cancelled"
+    assert ctx.shopify.cancel_calls == [("gid://shopify/Order/77", "2001")]
+    assert ctx.shopify.cancel_job_checks == ["gid://shopify/Job/cancel-77"]
+    assert ctx.db.get_checkpoint("shopify_cancel_job:2001") is None
 
 
 def test_collects_all_line_problems_before_creating_one_review(ctx):

@@ -86,6 +86,11 @@ class Meli:
         return MeliOrder(order_id, "100", "paid", "2026-09-06T00:00:00+00:00", [
             MeliOrderLine("MLC1", None, "Widget", 2, "1000", "CLP", "ABC")])
 
+    def get_order_status(self, order_id):
+        if self.error:
+            raise self.error
+        return "paid"
+
     def list_all_listings(self):
         self.calls.append("catalog:meli")
         return list(self.catalog)

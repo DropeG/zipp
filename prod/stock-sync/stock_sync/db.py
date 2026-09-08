@@ -281,3 +281,7 @@ class Database:
                 """,
                 (checkpoint_key, checkpoint_value, now),
             )
+
+    def delete_checkpoint(self, checkpoint_key: str) -> None:
+        with self._connect() as connection:
+            connection.execute("DELETE FROM checkpoints WHERE checkpoint_key = ?", (checkpoint_key,))

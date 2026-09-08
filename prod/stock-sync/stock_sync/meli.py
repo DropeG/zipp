@@ -169,6 +169,16 @@ class MeliClient:
             self._check_seller(seller_id)
             return seller_id
 
+    def get_order_status(self, order_id: str) -> str:
+        """Read only identity and status, tolerating irrelevant historical fields."""
+        with _review_errors(f"order:{order_id}", "get_order_status"):
+            data = self.transport.request("GET", f"/orders/{quote(_id(order_id), safe='')}")
+            seller_id = _id(_object(data["seller"])["id"])
+            self._check_seller(seller_id)
+            if _id(data["id"]) != str(order_id):
+                raise ValueError("order identifier")
+            return _text(data["status"])
+
     def get_order(self, order_id: str) -> MeliOrder:
         with _review_errors(f"order:{order_id}", "get_order"):
             data = self.transport.request("GET", f"/orders/{quote(_id(order_id), safe='')}")

@@ -1,6 +1,6 @@
 # Stock Sync De Produccion
 
-Este servicio recibe webhooks, los guarda en SQLite y un solo worker los procesa. Una venta pagada de Mercado Libre puede crear una orden pagada y etiquetada en Shopify; una orden de Shopify o la tarea diaria puede actualizar la cantidad de Mercado Libre. El receiver solo encola trabajo: no llama a Shopify ni a Mercado Libre.
+Este servicio recibe webhooks, los guarda en SQLite y un solo worker los procesa. Una venta pagada de Mercado Libre puede crear una orden pagada y etiquetada en Shopify; una orden de Shopify o la tarea diaria puede actualizar la cantidad de Mercado Libre. Una cancelacion de Mercado Libre cancela su orden Shopify vinculada, sin reembolso ni correo y con reposicion de inventario, siempre que aun no este preparada. Una cancelacion de Shopify vuelve a copiar su stock final a Mercado Libre. El receiver solo encola trabajo: no llama a Shopify ni a Mercado Libre.
 
 Todos los comandos de este documento se ejecutan desde `prod/stock-sync`. Las imagenes fijan Python 3.14.6 y Node.js 24.19.0; el host solo necesita Docker Engine y Docker Compose v2.
 
@@ -105,7 +105,7 @@ El receiver no se expone directamente al host ni a Internet: solo pertenece a la
 
 La lista incluida se copio de la documentacion oficial de [notificaciones de Mercado Libre Chile](https://developers.mercadolibre.cl/es_ar/publica-productos/productos-recibe-notificaciones) el 2026-09-07. Las IPs pueden cambiar: el operador debe revisar esa pagina y actualizar el ejemplo desplegado antes de cada rollout. Configure la URL publica de callback de Mercado Libre hacia la ruta Nginx `POST /webhooks/meli`, no hacia `127.0.0.1`.
 
-Shopify puede usar su propia ruta proxied `POST /webhooks/shopify/orders-create`; no necesita el secreto interno de Mercado Libre y el receiver conserva la verificacion HMAC de Shopify. El endpoint local `GET /health` responde `ok`.
+Shopify usa las rutas proxied `POST /webhooks/shopify/orders-create` y `POST /webhooks/shopify/orders-cancelled`; ambas conservan la verificacion HMAC de Shopify. Registre exactamente una suscripcion `ORDERS_CREATE` hacia la primera y una `ORDERS_CANCELLED` hacia la segunda. Ninguna necesita el secreto interno de Mercado Libre. El endpoint local `GET /health` responde `ok`.
 
 ## Comandos
 
@@ -146,6 +146,8 @@ Las notificaciones de Mercado Libre se deduplican por su `_id` de entrega. Cada 
 Antes de enviar `orderCreate`, el worker guarda un registro en `order_creates`. Si Shopify pudo aceptar la orden pero se pierde la respuesta, una busqueda sin resultado no autoriza otra creacion. El trabajo requiere conciliacion humana y `retry JOB_ID` solo vuelve a buscar la orden existente. Verifique en Shopify la etiqueta `meli-order-ID` y el identificador de origen; cuando esa orden sea visible, el reintento guarda su enlace y resuelve el borrador incluyendo el ID Shopify. No borre el registro de intento para forzar otra orden: si no se puede probar el resultado, mantenga el trabajo en revision. Una respuesta explicita de validacion con `order: null` y `userErrors` permite corregir el problema y reintentar la creacion.
 
 Los problemas de una orden real se resuelven por separado: reparar un SKU conserva cualquier otro problema pendiente en esa orden. Un stock Shopify negativo se copia a Mercado Libre como cero y mantiene una revision de faltante en la orden real hasta corregirlo. Los borradores usan primero su enlace SQLite y conservan sus notas al resolverse.
+
+Las cancelaciones tambien son idempotentes. Si Mercado Libre cancela una venta importada que sigue sin preparar, el worker cancela la orden Shopify con `restock: true`, `notifyCustomer: false` y sin reembolso en Shopify; luego reconcilia el stock absoluto. Si la orden ya esta preparada o Shopify rechaza la cancelacion, queda en `needs_review` y no se fuerza. Al cancelar manualmente una orden en Shopify, seleccione **reponer inventario**: el webhook `orders/cancelled` copia esa cantidad final a Mercado Libre. Si no se repone en Shopify, el sincronizador conserva deliberadamente esa cantidad menor en ambos canales.
 
 Ejecute la revision diaria primero sin cambios y revise el JSON `planned_updates`:
 

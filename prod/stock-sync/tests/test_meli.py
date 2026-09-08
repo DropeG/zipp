@@ -131,6 +131,19 @@ def test_non_paid_order_still_verifies_seller(meli, session):
         meli.get_order("2001")
 
 
+def test_order_status_ignores_unrelated_malformed_historical_fields(meli, session):
+    session.queue({
+        "id": 2001,
+        "seller": {"id": 100},
+        "status": "cancelled",
+        "order_items": None,
+        "date_closed": "not-a-date",
+    })
+
+    assert meli.get_order_status("2001") == "cancelled"
+    assert len(session.calls) == 1
+
+
 def test_paid_order_preserves_status_and_exact_lines(meli, session):
     payload = order(status="paid")
     payload["order_items"].append({"item": {"id": "MLC2", "title": "Other", "variation_id": 9,

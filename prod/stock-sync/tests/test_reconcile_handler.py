@@ -9,6 +9,7 @@ from stock_sync.errors import RetryableSyncError, ReviewRequiredError
 from stock_sync.handlers import (
     handle_import_meli_order,
     handle_reconcile_sku,
+    handle_shopify_cancelled,
     handle_shopify_order,
 )
 from stock_sync.models import MeliListing, MeliOrder, MeliOrderLine, ShopifyVariant
@@ -92,6 +93,9 @@ class FakeMeli:
             MeliOrderLine("MLC1", None, "Widget", 2, "1000", "CLP", "ABC"),
         ])
 
+    def get_order_status(self, order_id):
+        return self.get_order(order_id).status
+
 
 @pytest.fixture
 def ctx(db):
@@ -108,6 +112,14 @@ def order_job(db, lines, order_id=88, **extra):
 def reconcile_job(db, order_id=88, sku="ABC", **extra):
     job_id = db.enqueue_job("reconcile_sku", f"shopify-order:{order_id}:{sku}",
                             {"sku": sku, "shopify_order_id": f"gid://shopify/Order/{order_id}", **extra}, f"sku:{sku}")
+    return db.get_job(job_id)
+
+
+def cancelled_job(db, lines, order_id=88):
+    job_id = db.enqueue_job(
+        "shopify_cancelled", f"shopify-cancelled:{order_id}",
+        {"id": order_id, "line_items": lines}, f"order:{order_id}",
+    )
     return db.get_job(job_id)
 
 
@@ -134,6 +146,28 @@ def test_shopify_order_enqueues_distinct_exact_skus_without_changing_inventory(c
     assert ctx.shopify.quantity == 8
     assert ctx.shopify.inventory_adjustments == []
     assert ctx.calls == []
+
+
+def test_shopify_cancellation_enqueues_distinct_reconciliation_key(ctx):
+    job = cancelled_job(ctx.db, [{"sku": "ABC"}, {"sku": "ABC"}])
+
+    result = handle_shopify_cancelled(job, ctx.db, ctx.shopify)
+
+    assert result["status"] == "enqueued"
+    assert [j.source_key for j in jobs(ctx.db)] == ["shopify-cancelled:88:ABC"]
+    assert jobs(ctx.db)[0].payload == {
+        "sku": "ABC", "shopify_order_id": "gid://shopify/Order/88",
+    }
+
+
+def test_shopify_cancellation_with_missing_sku_requires_review(ctx):
+    job = cancelled_job(ctx.db, [{"sku": "ABC"}, {}])
+
+    result = handle_shopify_cancelled(job, ctx.db, ctx.shopify)
+
+    assert result["status"] == "needs_review"
+    assert [j.source_key for j in jobs(ctx.db)] == ["shopify-cancelled:88:ABC"]
+    assert ("gid://shopify/Order/88", "shopify-cancelled:88") in ctx.shopify.order_reviews
 
 
 def test_import_enqueue_and_its_shopify_webhook_deduplicate(ctx):

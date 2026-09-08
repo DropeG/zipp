@@ -127,12 +127,24 @@ function createReceiver(options) {
         return;
       }
 
-      if (request.method === "POST" && request.url === "/webhooks/shopify/orders-create") {
+      const shopifyWebhook = {
+        "/webhooks/shopify/orders-create": {
+          topic: "orders/create",
+          jobType: "shopify_order",
+          sourcePrefix: "shopify-order",
+        },
+        "/webhooks/shopify/orders-cancelled": {
+          topic: "orders/cancelled",
+          jobType: "shopify_cancelled",
+          sourcePrefix: "shopify-cancelled",
+        },
+      }[request.url];
+      if (request.method === "POST" && shopifyWebhook) {
         const rawBody = await readRawBody(request, config.maxWebhookBytes);
         if (!validShopifyHmac(rawBody, config.shopifyWebhookSecret, request.headers["x-shopify-hmac-sha256"])) {
           throw new HttpError(401);
         }
-        if (request.headers["x-shopify-topic"] !== "orders/create"
+        if (request.headers["x-shopify-topic"] !== shopifyWebhook.topic
           || String(request.headers["x-shopify-shop-domain"] || "").toLowerCase() !== config.shopifyDomain
           || !request.headers["x-shopify-webhook-id"]) {
           throw new HttpError(400);
@@ -144,8 +156,8 @@ function createReceiver(options) {
           eventKey: request.headers["x-shopify-webhook-id"],
           payload: rawBody.toString("utf8"),
         }, {
-          jobType: "shopify_order",
-          sourceKey: `shopify-order:${id}`,
+          jobType: shopifyWebhook.jobType,
+          sourceKey: `${shopifyWebhook.sourcePrefix}:${id}`,
           resourceKey: `order:${id}`,
           payload: rawBody.toString("utf8"),
         });

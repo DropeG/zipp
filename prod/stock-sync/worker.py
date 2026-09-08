@@ -18,7 +18,12 @@ from stock_sync.config import Settings
 from stock_sync.daily import run_daily
 from stock_sync.db import Database
 from stock_sync.errors import RetryableSyncError, ReviewRequiredError
-from stock_sync.handlers import handle_import_meli_order, handle_reconcile_sku, handle_shopify_order
+from stock_sync.handlers import (
+    handle_import_meli_order,
+    handle_reconcile_sku,
+    handle_shopify_cancelled,
+    handle_shopify_order,
+)
 from stock_sync.meli import MeliClient
 from stock_sync.reviews import mark_order, publish_draft
 from stock_sync.shopify import ShopifyClient
@@ -129,8 +134,9 @@ def _claim(db: Database, now: datetime, dry_run: bool):
 def _review_target(job, db):
     if job.job_type == 'import_meli_order' and job.payload.get('order_id') is not None:
         return f"order:{job.payload['order_id']}", db.get_order_link(str(job.payload['order_id']))
-    if job.job_type == 'shopify_order' and job.payload.get('id') is not None:
-        return f"shopify-order:{job.payload['id']}", f"gid://shopify/Order/{job.payload['id']}"
+    if job.job_type in {'shopify_order', 'shopify_cancelled'} and job.payload.get('id') is not None:
+        prefix = 'shopify-cancelled' if job.job_type == 'shopify_cancelled' else 'shopify-order'
+        return f"{prefix}:{job.payload['id']}", f"gid://shopify/Order/{job.payload['id']}"
     if job.job_type == 'reconcile_sku' and job.payload.get('shopify_order_id'):
         return f"sku:{job.payload.get('sku', '')}", job.payload['shopify_order_id']
     return f'product:worker-job-{job.id}', None
@@ -175,6 +181,8 @@ def _route(job, db, shopify, meli, dry_run):
         return handle_import_meli_order(job, db, shopify, meli, dry_run=dry_run)
     if job.job_type == 'shopify_order':
         return handle_shopify_order(job, db, shopify, dry_run=dry_run)
+    if job.job_type == 'shopify_cancelled':
+        return handle_shopify_cancelled(job, db, shopify, dry_run=dry_run)
     if job.job_type == 'reconcile_sku':
         return handle_reconcile_sku(job, db, shopify, meli, dry_run=dry_run)
     raise ReviewRequiredError(f'product:worker-job-{job.id}', 'Unknown job type', {})

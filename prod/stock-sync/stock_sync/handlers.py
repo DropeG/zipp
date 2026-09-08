@@ -5,7 +5,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from .db import Database
-from .errors import OrderCreateRejectedError, ReviewRequiredError
+from .errors import OrderCreateRejectedError, RetryableSyncError, ReviewRequiredError
 from .meli import MeliClient
 from .models import Job, MeliOrder, ShopifyVariant
 from .reviews import mark_order, publish_draft, resolve_draft, resolve_order
@@ -103,6 +103,74 @@ def _finish_import(job, order_id, shopify_order_id, db, shopify, dry_run, skus=N
             "shopify_order_id": shopify_order_id}
 
 
+def _enqueue_reconciliations(
+    db: Database, shopify_order_id: str, skus: list[str], source_prefix: str,
+) -> None:
+    numeric_order_id = shopify_order_id.rsplit("/", 1)[-1]
+    for sku in sorted(set(skus)):
+        db.enqueue_job(
+            "reconcile_sku", f"{source_prefix}:{numeric_order_id}:{sku}",
+            {"sku": sku, "shopify_order_id": shopify_order_id}, f"sku:{sku}",
+        )
+
+
+def _cancel_linked_meli_order(
+    job: Job, order_id: str, shopify_order_id: str, db: Database,
+    shopify: ShopifyClient, dry_run: bool,
+) -> dict[str, Any]:
+    checkpoint_key = f"shopify_cancel_job:{order_id}"
+    try:
+        state = shopify.get_order_cancellation_state(shopify_order_id)
+        if dry_run:
+            if not state["cancelled"] and state["fulfillment_status"] != "UNFULFILLED":
+                return _import_review(job, order_id, [
+                    f"Shopify order cannot be cancelled automatically because fulfillment status is "
+                    f"{state['fulfillment_status']}"
+                ], db, shopify, True)
+            return {
+                "status": "dry_run",
+                "order_id": order_id,
+                "shopify_order_id": shopify_order_id,
+                "action": "already_cancelled" if state["cancelled"] else "cancel_without_refund_and_restock",
+            }
+
+        db.link_order(order_id, shopify_order_id)
+        pending_job_id = db.get_checkpoint(checkpoint_key)
+        if pending_job_id is not None:
+            if not shopify.cancellation_job_done(pending_job_id):
+                raise RetryableSyncError(f"Shopify cancellation for Mercado Libre order {order_id} is still processing")
+            state = shopify.get_order_cancellation_state(shopify_order_id)
+
+        if not state["cancelled"] and pending_job_id is None:
+            if state["fulfillment_status"] != "UNFULFILLED":
+                return _import_review(job, order_id, [
+                    f"Shopify order cannot be cancelled automatically because fulfillment status is "
+                    f"{state['fulfillment_status']}"
+                ], db, shopify, False)
+            cancellation_job_id, done = shopify.cancel_imported_order(shopify_order_id, order_id)
+            db.set_checkpoint(checkpoint_key, cancellation_job_id)
+            if not done:
+                raise RetryableSyncError(f"Shopify cancellation for Mercado Libre order {order_id} is still processing")
+            state = shopify.get_order_cancellation_state(shopify_order_id)
+
+        if not state["cancelled"]:
+            raise RetryableSyncError(f"Shopify cancellation for Mercado Libre order {order_id} is not visible yet")
+
+        skus = shopify.get_order_skus(shopify_order_id)
+        _enqueue_reconciliations(db, shopify_order_id, skus, "shopify-cancelled")
+        db.delete_checkpoint(checkpoint_key)
+        resolve_order(db, shopify, shopify_order_id, f"order:{order_id}")
+        db.complete_import_reviews(order_id)
+        return {
+            "status": "cancelled",
+            "order_id": order_id,
+            "shopify_order_id": shopify_order_id,
+            "skus": sorted(set(skus)),
+        }
+    except ReviewRequiredError as error:
+        return _import_review(job, order_id, [str(error)], db, shopify, dry_run)
+
+
 def handle_import_meli_order(
     job: Job, db: Database, shopify: ShopifyClient, meli: MeliClient,
     dry_run: bool = False,
@@ -118,6 +186,14 @@ def handle_import_meli_order(
     if shopify_order_id is None:
         shopify_order_id = shopify.find_imported_order(order_id)
     if shopify_order_id:
+        try:
+            order_status = meli.get_order_status(order_id)
+        except ReviewRequiredError as error:
+            return _import_review(job, order_id, [str(error)], db, shopify, dry_run)
+        if order_status == "cancelled":
+            return _cancel_linked_meli_order(
+                job, order_id, shopify_order_id, db, shopify, dry_run,
+            )
         return _finish_import(job, order_id, shopify_order_id, db, shopify, dry_run)
     if db.has_order_create(order_id):
         return _import_review(job, order_id, [
@@ -215,6 +291,48 @@ def handle_shopify_order(
     if not dry_run:
         resolve_order(db, shopify, shopify_order_id, f"shopify-order:{numeric_order_id}")
     return {"status": "dry_run" if dry_run else "enqueued", "shopify_order_id": shopify_order_id, "skus": sorted(skus)}
+
+
+def handle_shopify_cancelled(
+    job: Job, db: Database, shopify: ShopifyClient,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Reconcile Mercado Libre from Shopify's final, optionally-restocked stock."""
+    numeric_order_id = str(job.payload["id"])
+    shopify_order_id = f"gid://shopify/Order/{numeric_order_id}"
+    lines = job.payload.get("line_items")
+    problems = []
+    skus = set()
+    if not isinstance(lines, list) or not lines:
+        problems.append("Cancelled order must contain line items with SKUs")
+    else:
+        for index, line in enumerate(lines, 1):
+            sku = line.get("sku") if isinstance(line, dict) else None
+            if not isinstance(sku, str) or not sku.strip():
+                problems.append(f"Line {index}: missing SKU")
+            else:
+                skus.add(sku)
+
+    for sku in sorted(skus):
+        if not dry_run:
+            _enqueue_reconciliations(db, shopify_order_id, [sku], "shopify-cancelled")
+
+    if problems:
+        review_key = f"shopify-cancelled:{numeric_order_id}"
+        note = f"Shopify cancelled order {shopify_order_id}; attempts: {job.attempts}\n" + "\n".join(problems)
+        if not dry_run:
+            mark_order(db, shopify, shopify_order_id, review_key, note)
+            db.needs_review(job.id, review_key, note)
+        return {
+            "status": "needs_review", "shopify_order_id": shopify_order_id,
+            "problems": problems, "skus": sorted(skus),
+        }
+    if not dry_run:
+        resolve_order(db, shopify, shopify_order_id, f"shopify-cancelled:{numeric_order_id}")
+    return {
+        "status": "dry_run" if dry_run else "enqueued",
+        "shopify_order_id": shopify_order_id, "skus": sorted(skus),
+    }
 
 
 def handle_reconcile_sku(

@@ -48,6 +48,19 @@ def default_reply(operation: str) -> dict[str, Any]:
         return {"orders": {"nodes": []}}
     if operation == "create_imported_order":
         return {"orderCreate": {"order": {"id": "gid://shopify/Order/77"}, "userErrors": []}}
+    if operation == "get_order_cancellation_state":
+        return {"order": {
+            "id": "gid://shopify/Order/77",
+            "cancelledAt": None,
+            "displayFulfillmentStatus": "UNFULFILLED",
+        }}
+    if operation == "cancel_imported_order":
+        return {"orderCancel": {
+            "job": {"id": "gid://shopify/Job/cancel-77", "done": True},
+            "orderCancelUserErrors": [],
+        }}
+    if operation == "get_cancellation_job":
+        return {"job": {"id": "gid://shopify/Job/cancel-77", "done": True}}
     if operation == "find_review":
         return {"draftOrders": {"nodes": []}}
     if operation == "get_review":
@@ -215,6 +228,47 @@ def test_find_imported_order_returns_tag_match(shopify, transport):
 
     assert shopify.find_imported_order("2001") == "gid://shopify/Order/77"
     assert transport.last_variables == {"query": "tag:meli-order-2001"}
+
+
+def test_cancel_imported_order_restock_without_refund_or_notification(shopify, transport):
+    job_id, done = shopify.cancel_imported_order("gid://shopify/Order/77", "2001")
+
+    assert (job_id, done) == ("gid://shopify/Job/cancel-77", True)
+    assert transport.last_variables == {
+        "orderId": "gid://shopify/Order/77",
+        "notifyCustomer": False,
+        "refundMethod": {"originalPaymentMethodsRefund": False},
+        "restock": True,
+        "reason": "CUSTOMER",
+        "staffNote": "Cancelled automatically because Mercado Libre order 2001 was cancelled.",
+    }
+
+
+def test_order_cancellation_state_and_async_job_are_strictly_validated(shopify, transport):
+    assert shopify.get_order_cancellation_state("gid://shopify/Order/77") == {
+        "cancelled": False,
+        "cancelled_at": None,
+        "fulfillment_status": "UNFULFILLED",
+    }
+    assert shopify.cancellation_job_done("gid://shopify/Job/cancel-77") is True
+
+    transport.replies["get_order_cancellation_state"] = {"order": None}
+    with pytest.raises(ReviewRequiredError, match="not found"):
+        shopify.get_order_cancellation_state("gid://shopify/Order/77")
+
+
+def test_order_cancellation_user_error_requires_review(shopify, transport):
+    transport.replies["cancel_imported_order"] = {"orderCancel": {
+        "job": None,
+        "orderCancelUserErrors": [{
+            "field": ["orderId"], "message": "Order has a fulfillment", "code": "HAS_FULFILLMENTS",
+        }],
+    }}
+
+    with pytest.raises(ReviewRequiredError, match="fulfillment") as raised:
+        shopify.cancel_imported_order("gid://shopify/Order/77", "2001")
+
+    assert raised.value.details["fields"] == ["orderId"]
 
 
 def test_duplicate_sku_returns_both_variants(shopify, transport):

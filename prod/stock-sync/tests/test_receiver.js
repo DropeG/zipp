@@ -50,10 +50,10 @@ function jobFor(dbPath, jobType) {
   return { ...job };
 }
 
-function signedShopifyHeaders(body, deliveryId = "delivery-1") {
+function signedShopifyHeaders(body, deliveryId = "delivery-1", topic = "orders/create") {
   return {
     "x-shopify-hmac-sha256": createHmac("sha256", shopifySecret).update(body).digest("base64"),
-    "x-shopify-topic": "orders/create",
+    "x-shopify-topic": topic,
     "x-shopify-shop-domain": "example.myshopify.com",
     "x-shopify-webhook-id": deliveryId,
   };
@@ -90,6 +90,13 @@ async function startReceiver() {
     postSignedShopify(body, deliveryId) {
       return this.postShopify(body, signedShopifyHeaders(body, deliveryId));
     },
+    postShopifyCancelled(body, deliveryId = "cancel-delivery-1") {
+      return this.postRaw(
+        "/webhooks/shopify/orders-cancelled",
+        body,
+        signedShopifyHeaders(body, deliveryId, "orders/cancelled"),
+      );
+    },
   };
 }
 
@@ -115,6 +122,23 @@ test("deduplicates Shopify delivery IDs", async (t) => {
   assert.deepEqual(jobFor(receiver.dbPath, "shopify_order"), {
     job_type: "shopify_order",
     source_key: "shopify-order:1001",
+    resource_key: "order:1001",
+    payload: orderPayload,
+  });
+});
+
+test("accepts and deduplicates Shopify order cancellation deliveries", async (t) => {
+  const receiver = await startReceiver();
+  t.after(() => receiver.close());
+
+  assert.equal((await receiver.postShopifyCancelled(orderPayload)).status, 200);
+  assert.equal((await receiver.postShopifyCancelled(orderPayload)).status, 200);
+
+  assert.equal(countRows(receiver.dbPath, "events"), 1);
+  assert.equal(countRows(receiver.dbPath, "jobs"), 1);
+  assert.deepEqual(jobFor(receiver.dbPath, "shopify_cancelled"), {
+    job_type: "shopify_cancelled",
+    source_key: "shopify-cancelled:1001",
     resource_key: "order:1001",
     payload: orderPayload,
   });

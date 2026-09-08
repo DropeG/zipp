@@ -231,6 +231,106 @@ class ShopifyClient:
         nodes = data["orders"].get("nodes", [])
         return None if not nodes else str(nodes[0]["id"])
 
+    def get_order_cancellation_state(self, order_id: str) -> dict[str, Any]:
+        data = self.transport.execute(
+            "get_order_cancellation_state",
+            """
+            query OrderCancellationState($id: ID!) {
+              order(id: $id) { id cancelledAt displayFulfillmentStatus }
+            }
+            """,
+            {"id": order_id},
+        )
+        order = data.get("order")
+        if not isinstance(order, dict) or order.get("id") != order_id:
+            raise ReviewRequiredError(
+                order_id, "Shopify order was not found before cancellation",
+                {"operation": "get_order_cancellation_state", "fields": ["id"]},
+            )
+        cancelled_at = order.get("cancelledAt")
+        fulfillment_status = order.get("displayFulfillmentStatus")
+        if cancelled_at is not None and (not isinstance(cancelled_at, str) or not cancelled_at):
+            raise ReviewRequiredError(
+                order_id, "Shopify returned an invalid cancellation timestamp",
+                {"operation": "get_order_cancellation_state", "fields": ["cancelledAt"]},
+            )
+        if not isinstance(fulfillment_status, str) or not fulfillment_status:
+            raise ReviewRequiredError(
+                order_id, "Shopify returned an invalid fulfillment status",
+                {"operation": "get_order_cancellation_state", "fields": ["displayFulfillmentStatus"]},
+            )
+        return {
+            "cancelled": cancelled_at is not None,
+            "cancelled_at": cancelled_at,
+            "fulfillment_status": fulfillment_status,
+        }
+
+    def cancel_imported_order(self, order_id: str, meli_order_id: str) -> tuple[str, bool]:
+        data = self.transport.execute(
+            "cancel_imported_order",
+            """
+            mutation CancelImportedOrder(
+              $orderId: ID!, $notifyCustomer: Boolean!,
+              $refundMethod: OrderCancelRefundMethodInput!, $restock: Boolean!,
+              $reason: OrderCancelReason!, $staffNote: String!
+            ) {
+              orderCancel(
+                orderId: $orderId, notifyCustomer: $notifyCustomer,
+                refundMethod: $refundMethod, restock: $restock,
+                reason: $reason, staffNote: $staffNote
+              ) {
+                job { id done }
+                orderCancelUserErrors { field message code }
+              }
+            }
+            """,
+            {
+                "orderId": order_id,
+                "notifyCustomer": False,
+                "refundMethod": {"originalPaymentMethodsRefund": False},
+                "restock": True,
+                "reason": "CUSTOMER",
+                "staffNote": f"Cancelled automatically because Mercado Libre order {meli_order_id} was cancelled.",
+            },
+        )
+        result = data.get("orderCancel")
+        if not isinstance(result, dict):
+            raise ReviewRequiredError(
+                f"order:{meli_order_id}", "Shopify cancellation returned no mutation result",
+                {"operation": "cancel_imported_order", "fields": []},
+            )
+        errors = result.get("orderCancelUserErrors") or []
+        if errors:
+            fields = [str(field) for error in errors for field in error.get("field") or []]
+            message = "; ".join(str(error.get("message", "Unknown Shopify error")) for error in errors)
+            raise ReviewRequiredError(
+                f"order:{meli_order_id}", f"Shopify cancellation: {message}",
+                {"operation": "cancel_imported_order", "fields": fields},
+            )
+        job = result.get("job")
+        if (not isinstance(job, dict) or not isinstance(job.get("id"), str)
+                or not job["id"].startswith("gid://shopify/Job/") or type(job.get("done")) is not bool):
+            raise ReviewRequiredError(
+                f"order:{meli_order_id}", "Shopify cancellation returned no valid job",
+                {"operation": "cancel_imported_order", "fields": ["job"]},
+            )
+        return job["id"], job["done"]
+
+    def cancellation_job_done(self, job_id: str) -> bool:
+        data = self.transport.execute(
+            "get_cancellation_job",
+            "query CancellationJob($id: ID!) { job(id: $id) { id done } }",
+            {"id": job_id},
+        )
+        job = data.get("job")
+        if (not isinstance(job, dict) or job.get("id") != job_id
+                or type(job.get("done")) is not bool):
+            raise ReviewRequiredError(
+                job_id, "Shopify cancellation job could not be verified",
+                {"operation": "get_cancellation_job", "fields": ["id", "done"]},
+            )
+        return job["done"]
+
     def create_imported_order(
         self, order: MeliOrder, variants: Mapping[str, ShopifyVariant]
     ) -> str:

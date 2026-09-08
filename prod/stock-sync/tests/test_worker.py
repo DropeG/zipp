@@ -90,6 +90,12 @@ class Meli:
             raise self.error
         return self.order
 
+    def get_order_status(self, order_id):
+        self.reads += 1
+        if self.error:
+            raise self.error
+        return self.order.status
+
     def list_all_listings(self):
         return list(self.listings)
 
@@ -112,6 +118,7 @@ def enqueue(ctx, kind='import_meli_order', attempts=0, payload=None):
     defaults = {
         'import_meli_order': ('meli-order:2001', 'order:2001', {'order_id': '2001'}),
         'shopify_order': ('shopify-order:88', 'order:88', {'id': 88, 'line_items': [{'sku': 'ABC'}, {'sku': 'ABC'}]}),
+        'shopify_cancelled': ('shopify-cancelled:88', 'order:88', {'id': 88, 'line_items': [{'sku': 'ABC'}]}),
         'reconcile_sku': ('shopify-order:88:ABC', 'sku:ABC', {'sku': 'ABC', 'shopify_order_id': 'gid://shopify/Order/88'}),
     }
     source, resource, default_payload = defaults.get(kind, ('wrong', 'wrong', {}))
@@ -123,6 +130,24 @@ def enqueue(ctx, kind='import_meli_order', attempts=0, payload=None):
 
 def run(ctx, **kwargs):
     return worker.process_one(ctx.db, ctx.shopify, ctx.meli, now=ctx.now, **kwargs)
+
+
+def test_shopify_cancelled_job_enqueues_stock_reconciliation(ctx):
+    job_id = enqueue(ctx, 'shopify_cancelled')
+
+    result = run(ctx)
+
+    assert result["status"] == "enqueued"
+    assert ctx.db.get_job(job_id).status == "completed"
+    with ctx.db._connect() as connection:
+        queued = connection.execute(
+            "SELECT source_key, resource_key, payload FROM jobs WHERE job_type = 'reconcile_sku'"
+        ).fetchone()
+    assert queued["source_key"] == "shopify-cancelled:88:ABC"
+    assert queued["resource_key"] == "sku:ABC"
+    assert json.loads(queued["payload"]) == {
+        "sku": "ABC", "shopify_order_id": "gid://shopify/Order/88",
+    }
 
 
 def row(db, job_id):
