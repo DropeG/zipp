@@ -1,0 +1,6 @@
+interface:
+  display_name: "Shopify to Mercado Libre"
+  short_description: "Publish the next Shopify product to MLC"
+  default_prompt: "Use $shopify-to-meli-one-by-one to publish the next unsynced Shopify product."
+policy:
+  allow_implicit_invocation: false
